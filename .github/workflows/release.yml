@@ -39,7 +39,14 @@ jobs:
         if: matrix.setup
         run: ${{ matrix.setup }}
 
+      - name: Build release binary (musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          OPENSSL_STATIC: '1'
+        run: cargo build --release --target ${{ matrix.target }} --all-features
+
       - name: Build release binary
+        if: matrix.target != 'x86_64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }} --all-features
 
       - name: Package (unix)
