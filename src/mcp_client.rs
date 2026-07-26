@@ -68,7 +68,7 @@ impl McpClient {
                 "capabilities": {},
                 "clientInfo": {
                     "name": "llm-browser-testkit",
-                    "version": "0.1.1"
+                    "version": "0.1.2"
                 }
             },
             "id": 0
@@ -202,7 +202,7 @@ impl McpClient {
                 "capabilities": {},
                 "clientInfo": {
                     "name": "llm-browser-testkit",
-                    "version": "0.1.1"
+                    "version": "0.1.2"
                 }
             },
             "id": 0
