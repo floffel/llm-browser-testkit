@@ -91,7 +91,7 @@ enum Command {
         budget_enforcement: Option<String>,
 
         /// Port for the A2A agent server (enables a2a-server mode).
-        #[arg(long)]
+        #[arg(long, env = "A2A_SERVER_PORT")]
         agent_port: Option<u16>,
     },
 }

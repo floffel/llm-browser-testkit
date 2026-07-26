@@ -1,0 +1,5 @@
+# Default scenario for the A2A agent server image.
+# Mount your own scenarios at /scenarios and set A2A_SERVER_PORT.
+
+[config]
+a2a_server = { enabled = true, port = 3100 }

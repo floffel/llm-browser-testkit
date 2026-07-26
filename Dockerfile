@@ -1,8 +1,6 @@
 # Build stage
 FROM rust:1.89-alpine AS builder
 
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
-
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
@@ -19,5 +17,8 @@ ENV CHROME_BIN=/usr/bin/chromium-browser
 ENV CHROMEDRIVER=/usr/bin/chromedriver
 
 COPY --from=builder /app/target/release/llm-browser-testkit /usr/local/bin/llm-browser-testkit
+COPY default-scenario.toml /default-scenario.toml
 
+EXPOSE 3100
 ENTRYPOINT ["llm-browser-testkit"]
+CMD ["run", "/default-scenario.toml"]
