@@ -242,10 +242,7 @@ steps = []
     let cloned = scenario.config.clone();
     // Use both original and clone to avoid redundant-clone lint
     assert!(scenario.config.base_url.is_some());
-    assert_eq!(
-        cloned.base_url.as_deref(),
-        Some("https://example.com")
-    );
+    assert_eq!(cloned.base_url.as_deref(), Some("https://example.com"));
     assert_eq!(cloned.timeout_secs, Some(30));
 }
 

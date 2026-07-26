@@ -1,7 +1,7 @@
 //! A2A server — exposes the framework as an A2A agent.
 //!
 //! Listens on a port and accepts A2A JSON-RPC `tasks/send` requests.
-//! Interpretes natural-language task descriptions and runs browser test
+//! Interprets natural-language task descriptions and runs browser test
 //! scenarios.
 //!
 //! Supported task instructions:
