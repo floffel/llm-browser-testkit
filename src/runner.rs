@@ -201,6 +201,21 @@ impl ScenarioRunner {
             }
         }
 
+        // Start A2A agent server if configured
+        #[cfg(feature = "a2a-server")]
+        if let Some(ref a2a_cfg) = self.config.a2a_server {
+            if a2a_cfg.enabled {
+                let port = a2a_cfg.port;
+                tokio::spawn(crate::a2a_server::start_a2a_server(port));
+            }
+        }
+        #[cfg(not(feature = "a2a-server"))]
+        if let Some(a2a_cfg) = &self.config.a2a_server {
+            if a2a_cfg.enabled {
+                eprintln!("  ⚠️  A2A server configured but 'a2a-server' feature not enabled");
+            }
+        }
+
         for test in tests {
             eprintln!("\n╔══════════════════════════════");
             eprintln!("║  Test: {}", test.name);

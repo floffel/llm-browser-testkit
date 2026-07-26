@@ -35,6 +35,10 @@ pub mod runner;
 /// Declarative TOML-based test scenario types.
 pub mod scenario;
 
+/// A2A agent server for accepting agent tasks.
+#[cfg(feature = "a2a-server")]
+pub mod a2a_server;
+
 /// `#[browser_test]` macros for `cargo test` integration.
 #[cfg(feature = "macros")]
 pub mod macros;

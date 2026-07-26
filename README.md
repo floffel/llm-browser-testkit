@@ -17,6 +17,7 @@ llm-browser-testkit run smoke.toml
 - [CLI reference](#cli-reference)
 - [Endpoints](#endpoints)
 - [A2A agents](#a2a-agents)
+- [Run as an A2A agent](#run-as-an-a2a-agent)
 - [MCP tools](#mcp-tools)
 - [MCP server](#mcp-server-exposure)
 - [Cost tracking & budgets](#cost-tracking--budgets)
@@ -250,6 +251,43 @@ assert_text = "the user can see the dashboard"
 
 Template variables available: `{url}`, `{title}`, `{content}`, `{expected_text}`,
 `{description}`, `{task}`.
+
+## Run as an A2A agent
+
+Enable the `a2a-server` feature to expose the framework as an A2A agent that
+other agents or orchestrators can call. The server listens on a port and accepts
+`tasks/send` JSON-RPC requests.
+
+```toml
+[config.a2a_server]
+enabled = true
+port = 3100
+```
+
+```bash
+# Build and run with the a2a-server feature
+cargo run --features a2a-server -- run scenario.toml --agent-port 3100
+```
+
+Or via CLI without modifying the TOML:
+
+```bash
+llm-browser-testkit run scenario.toml --agent-port 3100
+```
+
+### Docker deployment
+
+```bash
+docker build -t llm-browser-testkit .
+docker run --rm \
+  -e HARNESS_LLM_TEST_URL=https://api.openai.com \
+  -e HARNESS_LLM_TEST_MODEL=gpt-4o-mini \
+  -e HARNESS_LLM_API_KEY=sk-... \
+  llm-browser-testkit run scenario.toml --agent-port 3100 -p 3100:3100
+```
+
+A `Dockerfile` is included in the repository — it uses a multi-stage build with
+Alpine and Chromium.
 
 ## MCP tools
 

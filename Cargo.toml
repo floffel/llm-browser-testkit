@@ -14,6 +14,7 @@ readme = "README.md"
 default = []
 macros = []
 mcp-server = []
+a2a-server = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes"]
 
 [[bin]]
 name = "llm-browser-testkit"
@@ -42,3 +43,11 @@ toml = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 headless_chrome = "1"
+
+hyper = { version = "1", features = ["server"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+
+[dev-dependencies]
+wiremock = "0.6"

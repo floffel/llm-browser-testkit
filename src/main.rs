@@ -89,6 +89,10 @@ enum Command {
         /// Budget enforcement mode: `hard` (abort) or `soft` (warn).
         #[arg(long)]
         budget_enforcement: Option<String>,
+
+        /// Port for the A2A agent server (enables a2a-server mode).
+        #[arg(long)]
+        agent_port: Option<u16>,
     },
 }
 
@@ -136,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             max_cost,
             max_tokens,
             budget_enforcement,
+            agent_port,
         } => {
             let toml_content = std::fs::read_to_string(&scenario)
                 .with_context(|| format!("reading {}", scenario.display()))?;
@@ -199,6 +204,14 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(e) = enforce {
                     global.enforcement = Some(e);
                 }
+            }
+
+            // CLI A2A server override
+            if let Some(port) = agent_port {
+                config.a2a_server = Some(llm_browser_testkit::scenario::A2aServerConfig {
+                    enabled: true,
+                    port,
+                });
             }
 
             eprintln!("Base URL: {}", config.base_url.as_deref().unwrap_or("—"));
@@ -285,4 +298,63 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_cli_run_subcommand_exists() {
+        let cmd = super::Cli::command();
+        let matches = cmd.try_get_matches_from(["llm-browser-testkit", "run", "scenario.toml"]);
+        assert!(matches.is_ok());
+    }
+
+    #[test]
+    fn test_cli_run_with_all_flags() {
+        let cmd = super::Cli::command();
+        let matches = cmd.try_get_matches_from([
+            "llm-browser-testkit",
+            "run",
+            "scenario.toml",
+            "--llm-url",
+            "https://api.example.com",
+            "--llm-model",
+            "gpt-4o",
+            "--llm-api-key",
+            "sk-test",
+            "--llm-header",
+            "X-Org:acme",
+            "--model-param",
+            "effort=high",
+            "--base-url",
+            "https://myapp.com",
+            "--headless",
+            "--timeout",
+            "30",
+            "--viewport-width",
+            "1920",
+            "--viewport-height",
+            "1080",
+            "--start-url",
+            "/login",
+            "--max-cost",
+            "5.0",
+            "--max-tokens",
+            "500000",
+            "--budget-enforcement",
+            "soft",
+            "--agent-port",
+            "3100",
+        ]);
+        assert!(matches.is_ok());
+    }
+
+    #[test]
+    fn test_cli_run_minimal() {
+        let cmd = super::Cli::command();
+        let matches = cmd.try_get_matches_from(["llm-browser-testkit", "run", "test.toml"]);
+        assert!(matches.is_ok());
+    }
 }

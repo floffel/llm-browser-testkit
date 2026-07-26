@@ -128,6 +128,9 @@ pub struct ScenarioConfig {
     /// MCP server exposure configuration.
     #[serde(default)]
     pub mcp_server: Option<McpServerConfig>,
+    /// A2A agent server exposure configuration.
+    #[serde(default)]
+    pub a2a_server: Option<A2aServerConfig>,
 }
 
 /// A named endpoint definition with pricing.
@@ -241,6 +244,21 @@ pub struct McpServerConfig {
 
 const fn default_mcp_port() -> u16 {
     3000
+}
+
+/// A2A agent server exposure configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct A2aServerConfig {
+    /// Whether to enable the embedded A2A agent server.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port to listen on.
+    #[serde(default = "default_a2a_port")]
+    pub port: u16,
+}
+
+const fn default_a2a_port() -> u16 {
+    3100
 }
 
 fn deserialize_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
