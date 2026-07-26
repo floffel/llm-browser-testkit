@@ -267,7 +267,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 mod tests {
     use crate::costs::extract_usage;
     use crate::truncate;
-    use crate::{parse_headers_env, LlmConfig};
+    use crate::{llm_base_url, llm_model, parse_headers_env, LlmConfig};
 
     #[test]
     fn test_truncate_short() {
@@ -348,5 +348,96 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 0);
         assert_eq!(usage.completion_tokens, 0);
         assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_truncate_unicode() {
+        // truncate uses byte-level slicing, so max_len refers to byte count
+        // 'é' is 2 bytes, so index 3 captures "hé" (h=0, é=bytes 1-2)
+        assert_eq!(truncate("héllo", 3), "hé...<truncated>");
+        // Length 5 captures full string (5 bytes)
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_parse_headers_env_non_object() {
+        std::env::set_var("HARNESS_LLM_HEADERS", "[1, 2, 3]");
+        let h = parse_headers_env();
+        assert!(h.is_empty());
+        std::env::remove_var("HARNESS_LLM_HEADERS");
+    }
+
+    #[test]
+    fn test_parse_headers_env_nested_values_filtered() {
+        std::env::set_var(
+            "HARNESS_LLM_HEADERS",
+            r#"{"str":"val","num":42,"bool":true}"#,
+        );
+        let h = parse_headers_env();
+        assert_eq!(h.get("str").map(String::as_str), Some("val"));
+        assert!(!h.contains_key("num"));
+        assert!(!h.contains_key("bool"));
+        std::env::remove_var("HARNESS_LLM_HEADERS");
+    }
+
+    #[test]
+    fn test_llm_config_has_default_model() {
+        let config = LlmConfig::from_env();
+        assert!(!config.model.is_empty());
+    }
+
+    #[test]
+    fn test_llm_base_url_default() {
+        std::env::remove_var("HARNESS_LLM_TEST_URL");
+        let url = llm_base_url();
+        assert_eq!(url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_llm_base_url_custom() {
+        std::env::set_var("HARNESS_LLM_TEST_URL", "https://custom.api.com/v1");
+        let url = llm_base_url();
+        assert_eq!(url, "https://custom.api.com/v1");
+        std::env::remove_var("HARNESS_LLM_TEST_URL");
+    }
+
+    #[test]
+    fn test_llm_base_url_trailing_slash() {
+        std::env::set_var("HARNESS_LLM_TEST_URL", "https://api.com/");
+        let url = llm_base_url();
+        assert_eq!(url, "https://api.com");
+        std::env::remove_var("HARNESS_LLM_TEST_URL");
+    }
+
+    #[test]
+    fn test_llm_model_default() {
+        std::env::remove_var("HARNESS_LLM_TEST_MODEL");
+        assert_eq!(llm_model(), "deepseek");
+    }
+
+    #[test]
+    fn test_llm_model_custom() {
+        std::env::set_var("HARNESS_LLM_TEST_MODEL", "gpt-4o");
+        assert_eq!(llm_model(), "gpt-4o");
+        std::env::remove_var("HARNESS_LLM_TEST_MODEL");
+    }
+
+    #[test]
+    fn test_extract_usage_partial() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 50
+            }
+        });
+        let usage = extract_usage(&json);
+        assert_eq!(usage.prompt_tokens, 50);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_browser_headless_default() {
+        std::env::remove_var("HARNESS_BROWSER_HEADLESS");
+        assert!(crate::browser_headless());
     }
 }

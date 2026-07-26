@@ -22,3 +22,14 @@ pub fn start_mcp_server(port: u16) -> anyhow::Result<()> {
     eprintln!("MCP server started on port {port}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_start_mcp_server_returns_ok() {
+        let result = start_mcp_server(4567);
+        assert!(result.is_ok());
+    }
+}

@@ -92,6 +92,7 @@ fn extract_a2a_text(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_extract_a2a_text() {
@@ -133,5 +134,60 @@ mod tests {
         });
         let text = extract_a2a_text(&json);
         assert_eq!(text.as_deref(), Some("Final answer"));
+    }
+
+    #[test]
+    fn test_extract_a2a_text_error_response() {
+        let json = serde_json::json!({
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request"
+            }
+        });
+        let text = extract_a2a_text(&json);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_extract_a2a_text_no_messages() {
+        let json = serde_json::json!({
+            "result": {
+                "id": "task-123"
+            }
+        });
+        let text = extract_a2a_text(&json);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_extract_a2a_text_empty_messages() {
+        let json = serde_json::json!({
+            "result": {
+                "messages": []
+            }
+        });
+        let text = extract_a2a_text(&json);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_extract_a2a_text_no_text_part() {
+        let json = serde_json::json!({
+            "result": {
+                "messages": [
+                    {
+                        "parts": [{"type": "image", "data": "base64..."}]
+                    }
+                ]
+            }
+        });
+        let text = extract_a2a_text(&json);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_a2a_client_creation() {
+        let client = A2aClient::new("http://localhost:9090", Duration::from_secs(30));
+        assert_eq!(client.url, "http://localhost:9090");
     }
 }

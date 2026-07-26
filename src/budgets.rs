@@ -330,4 +330,58 @@ mod tests {
             BudgetStatus::HardExceeded { .. }
         ));
     }
+
+    #[test]
+    fn test_per_test_call_limit_hard() {
+        let config = BudgetsConfig {
+            global: None,
+            per_test_default: Some(BudgetDef {
+                max_cost: None,
+                max_tokens: None,
+                max_calls: Some(5),
+                enforcement: Some(BudgetEnforcement::Hard),
+            }),
+        };
+        let tracker = BudgetTracker::from_config(&config);
+        let ok_usage = UsageSnapshot {
+            total_calls: 3,
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(
+            tracker.check_per_test("test", &ok_usage, None),
+            BudgetStatus::Ok
+        );
+        let exceeded = UsageSnapshot {
+            total_calls: 10,
+            ..UsageSnapshot::default()
+        };
+        assert!(matches!(
+            tracker.check_per_test("test", &exceeded, None),
+            BudgetStatus::HardExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_all_budget_types_at_once() {
+        let config = BudgetsConfig {
+            global: None,
+            per_test_default: Some(BudgetDef {
+                max_cost: Some(1.0),
+                max_tokens: Some(1000),
+                max_calls: Some(10),
+                enforcement: Some(BudgetEnforcement::Hard),
+            }),
+        };
+        let tracker = BudgetTracker::from_config(&config);
+        let fine = UsageSnapshot {
+            total_cost: 0.5,
+            total_tokens: 500,
+            total_calls: 5,
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(
+            tracker.check_per_test("test", &fine, None),
+            BudgetStatus::Ok
+        );
+    }
 }

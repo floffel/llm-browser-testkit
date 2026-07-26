@@ -50,3 +50,53 @@ pub fn print_budget_warning(message: &str) {
 pub fn print_budget_error(message: &str) {
     eprintln!("  🛑 BUDGET EXCEEDED: {message}");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::costs::{EndpointUsage, UsageSnapshot};
+    use std::collections::HashMap;
+
+    fn make_snapshot(cost: f64, tokens: u64, calls: u64) -> UsageSnapshot {
+        let mut eps = HashMap::new();
+        eps.insert(
+            "default".to_owned(),
+            EndpointUsage {
+                calls,
+                input_tokens: tokens / 2,
+                output_tokens: tokens / 2,
+                cost,
+            },
+        );
+        UsageSnapshot::from_endpoints(&eps)
+    }
+
+    #[test]
+    fn test_print_report_empty() {
+        // Should return early, no panic
+        print_report(&[], &UsageSnapshot::default());
+    }
+
+    #[test]
+    fn test_print_report_single_test() {
+        let per_test = vec![("test1".to_owned(), make_snapshot(0.05, 500, 3))];
+        // Should not panic
+        print_report(&per_test, &make_snapshot(0.05, 500, 3));
+    }
+
+    #[test]
+    fn test_print_report_zero_cost() {
+        let per_test = vec![("free".to_owned(), make_snapshot(0.0, 0, 0))];
+        print_report(&per_test, &make_snapshot(0.0, 0, 0));
+    }
+
+    #[test]
+    fn test_print_budget_warning_no_panic() {
+        print_budget_warning("cost limit $1.00 exceeded");
+    }
+
+    #[test]
+    fn test_print_budget_error_no_panic() {
+        print_budget_error("cost limit $5.00 exceeded");
+    }
+}
