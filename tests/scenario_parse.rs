@@ -228,15 +228,25 @@ steps = []
 }
 
 #[test]
-fn test_scenario_clone_derive() {
+fn test_scenario_config_clone() {
     let toml = r#"
+[config]
+base_url = "https://example.com"
+timeout_secs = 30
+
 [[test]]
 name = "dummy"
-steps = [{ kind = "navigate", url = "/" }]
+steps = []
 "#;
     let scenario: Scenario = toml::from_str(toml).expect("parse");
-    let _cloned = scenario.config;
-    // Verify clone works fine
+    let cloned = scenario.config.clone();
+    // Use both original and clone to avoid redundant-clone lint
+    assert!(scenario.config.base_url.is_some());
+    assert_eq!(
+        cloned.base_url.as_deref(),
+        Some("https://example.com")
+    );
+    assert_eq!(cloned.timeout_secs, Some(30));
 }
 
 #[test]
