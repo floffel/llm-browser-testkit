@@ -1,11 +1,29 @@
 # llm-browser-testkit
 
 Describe browser tests in plain English. The LLM figures out which elements to
-click and whether the page looks right.
+click and whether the page looks right — plus A2A agents, MCP tool-calling, cost
+tracking, and budgets.
 
 ```
 llm-browser-testkit run smoke.toml
 ```
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Write your first test](#write-your-first-test)
+- [Step reference](#step-reference)
+- [Assertion presets](#assertion-presets)
+- [CLI reference](#cli-reference)
+- [Endpoints](#endpoints)
+- [A2A agents](#a2a-agents)
+- [MCP tools](#mcp-tools)
+- [MCP server](#mcp-server-exposure)
+- [Cost tracking & budgets](#cost-tracking--budgets)
+- [How it works](#how-it-works)
+- [Use as a library](#use-as-a-library)
+- [LLM authentication](#llm-authentication)
+- [License](#license)
 
 ## Quick start
 
@@ -60,15 +78,20 @@ Every step has a `kind`. Required fields depend on the kind.
 | `kind` | What it does | Required | Optional |
 |--------|-------------|----------|----------|
 | `navigate` | Open a URL | `url` | `wait_after_ms` |
-| `click` | Click an element | `target` | `selector`, `wait_after_ms` |
-| `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms` |
-| `wait` | Wait for an element | `target` | `selector`, `timeout_ms` |
-| `assert` | Check the page | one of `definition`, `preset`, or `prompt` | `assert_text` |
+| `click` | Click an element | `target` | `selector`, `wait_after_ms`, `endpoint` |
+| `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms`, `endpoint` |
+| `wait` | Wait for an element | `target` | `selector`, `timeout_ms`, `endpoint` |
+| `assert` | Check the page | one of `definition`, `preset`, or `prompt` | `assert_text`, `endpoint` |
 | `screenshot` | Save a .png | — | `path` |
+| `agent` | Call an A2A agent | `agent`, `task` | `definition` |
+| `mcp` | Call an MCP tool | `server`, `tool` | `args` |
 
 **`target`** is natural language ("the submit button", "the search input"). The
 LLM looks at the page DOM and picks the right CSS selector at runtime. Skip the
 LLM with an explicit `selector`.
+
+**`endpoint`** routes this step to a specific [endpoint](#endpoints). Use it to
+send element targeting to one model and assertions to another.
 
 ## Assertion presets
 
@@ -88,6 +111,18 @@ kind = "assert"
 prompt = "Does the page have a heading that says 'Example Domain'?"
 ```
 
+Custom presets with `system` + `user_template` let you define reusable assertion
+logic with template variables `{url}`, `{title}`, `{content}`, `{expected_text}`,
+and `{description}`:
+
+```toml
+[[definitions]]
+name = "text_matches"
+system = "You are a QA tester."
+user_template = "Does the page at {url} contain the text: {expected_text}?"
+assert_text = "Welcome back"
+```
+
 ## CLI reference
 
 ```
@@ -100,18 +135,233 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 | `--llm-model` | `$HARNESS_LLM_TEST_MODEL` or `deepseek` | Model name |
 | `--llm-api-key` | `$HARNESS_LLM_API_KEY` | API key (Bearer token) |
 | `--llm-header` | — | Custom header `Name:Value` (repeatable) |
+| `--model-param` | — | Provider param `key=value` (repeatable) |
 | `--base-url` | `$HARNESS_BROWSER_BASE_URL` or `http://localhost:4200` | App under test |
 | `--headless` | `true` | Run Chrome headlessly |
 | `--timeout` | `60` | Seconds per action |
 | `--viewport-width` | `1280` | Browser width |
 | `--viewport-height` | `720` | Browser height |
 | `--start-url` | `/dashboard` | First page to load |
+| `--max-cost` | — | Global budget: max USD across all tests |
+| `--max-tokens` | — | Global budget: max tokens across all tests |
+| `--budget-enforcement` | `hard` | Budget mode: `hard` (abort) or `soft` (warn) |
 
 CLI flags override the scenario `[config]`.
 
+## Endpoints
+
+Define multiple named endpoints — LLM providers, MCP servers, and A2A agents —
+each with their own pricing, and route test steps to them automatically or
+explicitly.
+
+```toml
+[config.endpoints.default]
+type = "llm"
+url = "https://api.openai.com"
+model = "gpt-4o-mini"
+api_key = "sk-..."
+pricing = { input_per_1m_tokens = 0.15, output_per_1m_tokens = 0.60 }
+default_for = ["targeting", "assertion"]
+
+[config.endpoints.vision]
+type = "llm"
+url = "https://api.openai.com"
+model = "gpt-4o"
+api_key = "sk-..."
+pricing = { input_per_1m_tokens = 2.50, output_per_1m_tokens = 10.00 }
+default_for = []
+
+[config.endpoints.db_mcp]
+type = "mcp"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
+pricing = { per_call = 0.001 }
+
+[config.endpoints.audit_agent]
+type = "a2a"
+url = "http://localhost:9090"
+pricing = { per_call = 0.01 }
+
+[[test]]
+name = "Dashboard with vision"
+
+[[test.steps]]
+kind = "navigate"
+url = "/dashboard"
+
+# Use the vision endpoint just for this assertion
+[[test.steps]]
+kind = "assert"
+preset = "no_error_on_page"
+endpoint = "vision"
+```
+
+**Endpoint types:**
+
+- `llm` — OpenAI-compatible chat completions API. Pricing is per-token
+  (`input_per_1m_tokens`, `output_per_1m_tokens`).
+- `mcp` — [Model Context Protocol](https://modelcontextprotocol.io) server.
+  Launched as a subprocess via `command` + `args`. Pricing is `per_call`.
+- `a2a` — [Agent-to-Agent Protocol](https://a2aprotocol.org) agent. Communicates
+  via JSON-RPC over HTTP at the given `url`. Pricing is `per_call`.
+
+**Routing:**
+
+- `default_for` lists which task types an endpoint serves automatically
+  (`targeting` for element resolution, `assertion` for assertions).
+- Add `endpoint = "name"` on any step or `[[test]]` group to override routing.
+
+## A2A agents
+
+Call remote A2A agents in your test scenarios as steps, or use them inside
+assertion definitions for reusable agent-backed checks.
+
+### Agent step
+
+```toml
+[config.endpoints.audit_bot]
+type = "a2a"
+url = "http://localhost:9090"
+pricing = { per_call = 0.01 }
+
+[[test]]
+name = "Audit trail check"
+steps = [
+    { kind = "navigate", url = "/admin/audit" },
+    { kind = "agent", agent = "audit_bot", task = "Check if user 'admin' appears in the recent audit log" },
+]
+```
+
+### Agent-backed assertions
+
+Define reusable agent assertions with `task_template`:
+
+```toml
+[[definitions]]
+name = "audit_verify"
+agent = "audit_bot"
+task_template = "Verify that {expected_text} is true for the page at {url}"
+
+[[test.steps]]
+kind = "assert"
+definition = "audit_verify"
+assert_text = "the user can see the dashboard"
+```
+
+Template variables available: `{url}`, `{title}`, `{content}`, `{expected_text}`,
+`{description}`, `{task}`.
+
+## MCP tools
+
+Call MCP server tools directly from test steps to query databases, read files,
+or invoke any tool an MCP server exposes.
+
+```toml
+[config.endpoints.db]
+type = "mcp"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
+pricing = { per_call = 0.001 }
+
+[[test]]
+name = "Database smoke test"
+steps = [
+    { kind = "navigate", url = "/dashboard" },
+    { kind = "mcp", server = "db", tool = "query", args = { sql = "SELECT count(*) FROM users" } },
+    { kind = "assert", preset = "no_error_on_page" },
+]
+```
+
+MCP servers are launched as subprocesses via the configured `command` and `args`.
+The framework handles the MCP initialize handshake, tool listing, and invocation
+automatically.
+
+## MCP server exposure
+
+Enable the `mcp-server` feature to expose the framework as an MCP server so
+other tools can invoke it remotely.
+
+```toml
+[config.mcp_server]
+enabled = true
+port = 3000
+```
+
+```bash
+cargo run --features mcp-server -- run scenario.toml
+```
+
+When enabled, other MCP clients can call tools like `run_scenario` and
+`get_page_state` on port 3000.
+
+## Cost tracking & budgets
+
+Every LLM call, agent invocation, and MCP tool call is tracked. After the run
+completes, a cost report is printed with per-test and per-endpoint breakdowns.
+
+### Per-test default budget
+
+```toml
+[config.budgets.per_test_default]
+max_cost = 1.0
+max_tokens = 100_000
+max_calls = 50
+enforcement = "hard"
+```
+
+### Per-test override
+
+```toml
+[[test]]
+name = "Expensive test"
+budget = { max_cost = 2.0, max_tokens = 200_000, enforcement = "soft" }
+```
+
+### Global budget
+
+```toml
+[config.budgets.global]
+max_cost = 5.0
+max_tokens = 500_000
+enforcement = "hard"
+```
+
+### Enforcement
+
+| Mode | Behavior |
+|------|---------|
+| `hard` | Abort the test or run immediately when budget is exceeded |
+| `soft` | Print a warning but continue executing remaining steps |
+
+### CLI budgets
+
+```bash
+llm-browser-testkit run scenario.toml --max-cost 10.0 --max-tokens 1000000 --budget-enforcement soft
+```
+
+### Sample report output
+
+```
+═══════════════════════════════════════════════
+  COST REPORT
+═══════════════════════════════════════════════
+  Test: "Homepage loads" — $0.0123 | 1,234 tokens | 4 calls
+    endpoint.default:   4 calls,   1,234 tokens, $0.0123
+  Test: "Dashboard smoke" — $0.0891 | 4,567 tokens | 6 calls
+    endpoint.vision:    2 calls,   3,000 tokens, $0.0450
+    endpoint.default:   3 calls,   1,567 tokens, $0.0441
+    endpoint.audit_bot:   1 call,   0 tokens, $0.0000
+───────────────────────────────────────────────
+  GLOBAL SUMMARY
+    Total cost:     $0.1014
+    Total tokens:   5,801
+    Total calls:    10
+═══════════════════════════════════════════════
+```
+
 ## How it works
 
-Three pieces:
+Four pieces:
 
 1. **Chrome** — launched via the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
    (`headless_chrome` crate). It navigates, clicks, types, and extracts page
@@ -124,18 +374,23 @@ Three pieces:
    - **Assertions**: the runner sends page content to the LLM with a QA prompt
      and expects `PASS` or `FAIL: <reason>`.
 
-3. **TOML scenarios** — declarative test files. No code, no CSS selectors
+3. **A2A + MCP** — connect to remote agents via the Agent-to-Agent Protocol
+   and to MCP servers for tool-calling. Both are first-class step kinds.
+
+4. **TOML scenarios** — declarative test files. No code, no CSS selectors
    required. Just describe what you want in English.
 
 ```
 TOML file  →  CLI runner  →  Chrome (CDP)  →  LLM API
+                                        →  A2A agent
+                                        →  MCP server
 ```
 
 ## Use as a library
 
 ```toml
 [dependencies]
-llm-browser-testkit = "0.1"
+llm-browser-testkit = { version = "0.1", features = ["macros", "mcp-server"] }
 ```
 
 ```rust
@@ -147,6 +402,17 @@ let runner = ScenarioRunner::new(scenario.config.clone(), scenario.definitions);
 let report = runner.run(&scenario.test)?;
 
 println!("Passed: {}, Failed: {}", report.tests_passed, report.tests_failed);
+
+// Access cost/usage data
+let usage = runner.usage_tracker();
+let global = usage.global_snapshot();
+println!("Total cost: ${:.4}", global.total_cost);
+
+// Print the cost report
+llm_browser_testkit::reporting::print_report(
+    &usage.per_test_snapshots(),
+    &global,
+);
 ```
 
 ### Macros: `#[browser_test]` in `cargo test`
@@ -188,7 +454,7 @@ Tests auto-skip when no LLM endpoint or Chrome is available — safe to include 
 every CI run. They only execute with real `PASS`/`FAIL` when infrastructure is
 present.
 
-### LLM authentication
+## LLM authentication
 
 The runner supports API keys and custom headers for SSO or alternative auth:
 
@@ -196,6 +462,16 @@ The runner supports API keys and custom headers for SSO or alternative auth:
 [config]
 llm_api_key = "sk-..."
 llm_headers = { "X-Org-ID" = "acme", "X-Project" = "qa" }
+```
+
+Endpoints can also carry their own credentials:
+
+```toml
+[config.endpoints.production]
+type = "llm"
+url = "https://api.openai.com"
+api_key = "sk-prod-..."
+model = "gpt-4o"
 ```
 
 Via CLI:
