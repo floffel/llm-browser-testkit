@@ -46,6 +46,8 @@
 //! `[[definitions]]` entry), `preset` (built-in preset name), or `prompt`
 //! (custom LLM evaluation prompt).
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 /// Top-level scenario file, deserialized from TOML.
@@ -73,6 +75,12 @@ pub struct ScenarioConfig {
     pub llm_url: Option<String>,
     /// LLM model name.
     pub llm_model: Option<String>,
+    /// LLM API key (Bearer token).
+    #[serde(default)]
+    pub llm_api_key: Option<String>,
+    /// Custom HTTP headers as JSON key-value pairs.
+    #[serde(default, deserialize_with = "deserialize_headers")]
+    pub llm_headers: HashMap<String, String>,
     /// Run browser in headless mode.
     pub browser_headless: Option<bool>,
     /// HTTP / browser action timeout in seconds.
@@ -93,6 +101,23 @@ pub struct ScenarioConfig {
     /// Enable thinking/reasoning mode (for models that support it).
     #[serde(default = "default_thinking")]
     pub thinking: bool,
+}
+
+fn deserialize_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    let Some(json) = raw else {
+        return Ok(HashMap::new());
+    };
+    let serde_json::Value::Object(obj) = json else {
+        return Ok(HashMap::new());
+    };
+    Ok(obj
+        .into_iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_owned())))
+        .collect())
 }
 
 const fn default_auto_navigate() -> bool {

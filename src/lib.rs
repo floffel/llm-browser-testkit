@@ -4,6 +4,7 @@
 //! - Browser client via Chrome `DevTools` Protocol (headless)
 //! - LLM client for natural language element targeting and assertions
 //! - Declarative TOML scenario runner
+//! - `#[browser_test]` macros for `cargo test` integration
 
 #![allow(
     clippy::expect_used,
@@ -11,18 +12,72 @@
     clippy::panic,
     clippy::missing_panics_doc
 )]
-//!
-//! Also includes a declarative scenario runner — define test steps in TOML
-//! and execute them via `ScenarioRunner` or the `llm-browser-testkit` CLI.
 
 /// Step-by-step scenario executor (navigate, click, type, wait, assert).
 pub mod runner;
 /// Declarative TOML-based test scenario types.
 pub mod scenario;
 
+/// `#[browser_test]` macros for `cargo test` integration.
+#[cfg(feature = "macros")]
+pub mod macros;
+
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::Value;
+
+/// Configuration for the LLM client — bundles URL, model, auth, timeouts,
+/// and provider-specific options into a single struct passed everywhere.
+#[derive(Debug, Clone)]
+pub struct LlmConfig {
+    /// OpenAI-compatible API base URL (without trailing `/v1/…`).
+    pub url: String,
+    /// Model name (e.g. `gpt-4o-mini`, `deepseek`).
+    pub model: String,
+    /// API key sent as `Authorization: Bearer <key>`.
+    pub api_key: Option<String>,
+    /// Custom headers appended to every LLM request.
+    pub headers: HashMap<String, String>,
+    /// HTTP timeout.
+    pub timeout: Duration,
+    /// Sampling temperature (0.0–1.0).
+    pub temperature: f64,
+    /// Enable extended thinking / reasoning tokens.
+    pub thinking: bool,
+}
+
+impl LlmConfig {
+    /// Build a config from environment defaults, falling back to safe
+    /// values when no env vars are set.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            url: llm_base_url(),
+            model: llm_model(),
+            api_key: std::env::var("HARNESS_LLM_API_KEY").ok(),
+            headers: parse_headers_env(),
+            timeout: Duration::from_secs(60),
+            temperature: 0.0,
+            thinking: false,
+        }
+    }
+}
+
+fn parse_headers_env() -> HashMap<String, String> {
+    let Ok(raw) = std::env::var("HARNESS_LLM_HEADERS") else {
+        return HashMap::new();
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&raw) else {
+        return HashMap::new();
+    };
+    let Some(obj) = json.as_object() else {
+        return HashMap::new();
+    };
+    obj.iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+        .collect()
+}
 
 /// Returns the target base URL from `HARNESS_BROWSER_BASE_URL` env,
 /// defaulting to `http://localhost:4200`.
@@ -69,36 +124,37 @@ pub fn http_client(timeout: Duration) -> reqwest::Client {
 ///
 /// Returns `Some(content)` on success, `None` on any error.
 pub async fn llm_chat(
-    llm_url: &str,
-    model: &str,
-    timeout: Duration,
+    llm: &LlmConfig,
     system: &str,
     user: &str,
-    temperature: f64,
-    thinking: bool,
 ) -> Option<String> {
-    let client = http_client(timeout);
+    let client = http_client(llm.timeout);
     let mut payload = serde_json::json!({
-        "model": model,
+        "model": llm.model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ],
         "max_tokens": 4096,
-        "temperature": temperature
+        "temperature": llm.temperature
     });
-    if thinking {
+    if llm.thinking {
         payload["thinking"] = serde_json::json!({"type": "enabled"});
     } else {
         payload["thinking"] = serde_json::json!({"type": "disabled"});
     }
-    let resp = client
-        .post(format!("{llm_url}/v1/chat/completions"))
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .ok()?;
+    let mut req = client
+        .post(format!("{}/v1/chat/completions", llm.url))
+        .header("Content-Type", "application/json");
+
+    if let Some(ref key) = llm.api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    for (name, value) in &llm.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    let resp = req.json(&payload).send().await.ok()?;
     let json: Value = resp.json().await.ok()?;
     json["choices"][0]["message"]["content"]
         .as_str()

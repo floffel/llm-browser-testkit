@@ -42,6 +42,14 @@ enum Command {
         #[arg(long, env = "HARNESS_LLM_TEST_MODEL")]
         llm_model: Option<String>,
 
+        /// LLM API key sent as `Authorization: Bearer <key>`.
+        #[arg(long, env = "HARNESS_LLM_API_KEY")]
+        llm_api_key: Option<String>,
+
+        /// Custom HTTP header `Name:Value` (repeatable, e.g. `--llm-header "X-Org:acme"`).
+        #[arg(long = "llm-header", value_parser = parse_header)]
+        llm_headers: Vec<(String, String)>,
+
         /// Run browser in headless mode (default: true).
         #[arg(long, default_value = "true")]
         headless: bool,
@@ -64,6 +72,14 @@ enum Command {
     },
 }
 
+/// Parses "Name:Value" strings from `--llm-header`.
+fn parse_header(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s
+        .split_once(':')
+        .ok_or_else(|| format!("header must be 'Name:Value', got '{s}'"))?;
+    Ok((k.trim().to_owned(), v.trim().to_owned()))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -74,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
             base_url,
             llm_url,
             llm_model,
+            llm_api_key,
+            llm_headers,
             headless,
             timeout,
             viewport_width,
@@ -91,6 +109,14 @@ async fn main() -> anyhow::Result<()> {
             config.base_url = base_url.or(config.base_url);
             config.llm_url = llm_url.or(config.llm_url);
             config.llm_model = llm_model.or(config.llm_model);
+            config.llm_api_key = llm_api_key.or(config.llm_api_key);
+            if !llm_headers.is_empty() {
+                let mut headers = config.llm_headers;
+                for (k, v) in llm_headers {
+                    headers.insert(k, v);
+                }
+                config.llm_headers = headers;
+            }
             config.browser_headless = Some(headless);
             config.timeout_secs = Some(timeout.max(config.timeout_secs.unwrap_or(60)));
             config.viewport_width = Some(viewport_width.max(config.viewport_width.unwrap_or(1280)));
@@ -130,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
             let definitions = std::mem::take(&mut scenario_def.definitions);
             let runner = llm_browser_testkit::runner::ScenarioRunner::new(config, definitions);
 
-            let report = runner.run(&scenario_def)?;
+            let report = runner.run(&scenario_def.test)?;
 
             eprintln!("\n═══════════════════════════════════════");
             eprintln!(

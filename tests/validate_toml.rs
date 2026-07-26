@@ -12,22 +12,32 @@ use std::fs;
 #[test]
 fn validate_all_toml_scenarios() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
-    let files = [
-        "smoke.toml",
-        "dashboard-smoke.toml",
-        "backlog-story-crud.toml",
-        "navigation-health.toml",
-        "full-feature-smoke.toml",
-        "basic-navigation.toml",
-    ];
-    for f in &files {
-        let path = format!("{dir}/{f}");
-        let content = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {dir}: {e}"));
+
+    let mut toml_files: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "toml")
+        })
+        .collect();
+    toml_files.sort_by_key(std::fs::DirEntry::file_name);
+    assert!(
+        !toml_files.is_empty(),
+        "no TOML examples found in {dir}"
+    );
+
+    for entry in &toml_files {
+        let path = entry.path();
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         let s: llm_browser_testkit::scenario::Scenario =
-            toml::from_str(&content).unwrap_or_else(|e| panic!("parsing {path}: {e}"));
-        assert!(!s.test.is_empty(), "{path}: no tests defined");
+            toml::from_str(&content)
+                .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+        assert!(!s.test.is_empty(), "{}: no tests defined", path.display());
         for t in &s.test {
-            assert!(!t.name.is_empty(), "{path}: test has empty name");
+            assert!(!t.name.is_empty(), "{}: test has empty name", path.display());
         }
     }
 }

@@ -5,8 +5,9 @@ use anyhow::Context;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 
 use crate::llm_chat;
-use crate::scenario::{AssertDefinition, Scenario, ScenarioConfig, TestGroup, TestStep};
+use crate::scenario::{AssertDefinition, ScenarioConfig, TestGroup, TestStep};
 use crate::truncate;
+use crate::LlmConfig;
 use crate::DOM_EXTRACT_JS;
 
 /// Executes a [`Scenario`] against a real browser with optional LLM
@@ -14,10 +15,7 @@ use crate::DOM_EXTRACT_JS;
 pub struct ScenarioRunner {
     config: ScenarioConfig,
     definitions: HashMap<String, AssertDefinition>,
-    llm_url: String,
-    llm_model: String,
-    temperature: f64,
-    thinking: bool,
+    llm: LlmConfig,
     timeout: Duration,
     viewport_width: u32,
     viewport_height: u32,
@@ -94,14 +92,27 @@ impl ScenarioRunner {
     /// assertion definitions.
     #[must_use]
     pub fn new(scenario_config: ScenarioConfig, definitions: Vec<AssertDefinition>) -> Self {
-        let llm_url = scenario_config
-            .llm_url
-            .clone()
-            .unwrap_or_else(crate::llm_base_url);
-        let llm_model = scenario_config
-            .llm_model
-            .clone()
-            .unwrap_or_else(crate::llm_model);
+        let llm = LlmConfig {
+            url: scenario_config
+                .llm_url
+                .clone()
+                .unwrap_or_else(crate::llm_base_url),
+            model: scenario_config
+                .llm_model
+                .clone()
+                .unwrap_or_else(crate::llm_model),
+            api_key: scenario_config.llm_api_key.clone().or_else(|| {
+                std::env::var("HARNESS_LLM_API_KEY").ok()
+            }),
+            headers: if scenario_config.llm_headers.is_empty() {
+                crate::parse_headers_env()
+            } else {
+                scenario_config.llm_headers.clone()
+            },
+            timeout: Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60)),
+            temperature: scenario_config.temperature,
+            thinking: scenario_config.thinking,
+        };
         let timeout = Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60));
         let viewport_width = scenario_config.viewport_width.unwrap_or(1280);
         let viewport_height = scenario_config.viewport_height.unwrap_or(720);
@@ -110,16 +121,10 @@ impl ScenarioRunner {
             .map(|d| (d.name.clone(), d))
             .collect();
 
-        let temperature = scenario_config.temperature;
-        let thinking = scenario_config.thinking;
-
         Self {
             config: scenario_config,
             definitions: defs_map,
-            llm_url,
-            llm_model,
-            temperature,
-            thinking,
+            llm,
             timeout,
             viewport_width,
             viewport_height,
@@ -131,10 +136,10 @@ impl ScenarioRunner {
     /// # Errors
     ///
     /// Returns an error if the browser fails to launch.
-    pub fn run(&self, scenario: &Scenario) -> anyhow::Result<RunReport> {
+    pub fn run(&self, tests: &[TestGroup]) -> anyhow::Result<RunReport> {
         let mut report = RunReport::default();
 
-        if scenario.test.is_empty() {
+        if tests.is_empty() {
             eprintln!("No tests defined in scenario.");
             return Ok(report);
         }
@@ -152,7 +157,7 @@ impl ScenarioRunner {
         let tab = browser.new_tab().context("failed to open browser tab")?;
         let _ = tab.set_default_timeout(self.timeout);
 
-        for test in &scenario.test {
+        for test in tests {
             eprintln!("\n══════════════════════════════");
             eprintln!("  TEST: {}", test.name);
             eprintln!("══════════════════════════════");
@@ -482,29 +487,17 @@ impl ScenarioRunner {
 
         eprintln!("      assert: {preset_name}");
 
-        let (llm_url, llm_model, timeout, temperature, thinking) = (
-            self.llm_url.clone(),
-            self.llm_model.clone(),
-            self.timeout,
-            self.temperature,
-            self.thinking,
+        let (llm, sys, prompt) = (
+            self.llm.clone(),
+            preset.system.to_owned(),
+            user_prompt,
         );
-        let sys = preset.system.to_owned();
-        let prompt = user_prompt;
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(
-                &llm_url,
-                &llm_model,
-                timeout,
-                &sys,
-                &prompt,
-                temperature,
-                thinking,
-            ))
+            rt.block_on(llm_chat(&llm, &sys, &prompt))
         })
         .join()
         .unwrap();
@@ -546,29 +539,17 @@ impl ScenarioRunner {
 
         eprintln!("      custom assert");
 
-        let (llm_url, llm_model, timeout, temperature, thinking) = (
-            self.llm_url.clone(),
-            self.llm_model.clone(),
-            self.timeout,
-            self.temperature,
-            self.thinking,
+        let (llm, sys, user_prompt) = (
+            self.llm.clone(),
+            system.to_owned(),
+            user,
         );
-        let sys = system.to_owned();
-        let user_prompt = user;
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(
-                &llm_url,
-                &llm_model,
-                timeout,
-                &sys,
-                &user_prompt,
-                temperature,
-                thinking,
-            ))
+            rt.block_on(llm_chat(&llm, &sys, &user_prompt))
         })
         .join()
         .unwrap();
@@ -668,29 +649,17 @@ impl ScenarioRunner {
 
         eprintln!("      LLM targeting: {target}");
 
-        let (llm_url, llm_model, timeout, temperature, thinking) = (
-            self.llm_url.clone(),
-            self.llm_model.clone(),
-            self.timeout,
-            self.temperature,
-            self.thinking,
+        let (llm, sys, user_prompt) = (
+            self.llm.clone(),
+            system.to_owned(),
+            user,
         );
-        let sys = system.to_owned();
-        let user_prompt = user;
         let selector = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(
-                &llm_url,
-                &llm_model,
-                timeout,
-                &sys,
-                &user_prompt,
-                temperature,
-                thinking,
-            ))
+            rt.block_on(llm_chat(&llm, &sys, &user_prompt))
         })
         .join()
         .unwrap()

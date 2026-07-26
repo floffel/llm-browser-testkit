@@ -10,6 +10,10 @@ keywords = ["llm", "testing", "browser", "e2e", "integration-testing"]
 categories = ["development-tools::testing"]
 readme = "README.md"
 
+[features]
+default = []
+macros = []
+
 [[bin]]
 name = "llm-browser-testkit"
 path = "src/main.rs"

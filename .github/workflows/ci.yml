@@ -28,8 +28,17 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy
+      - name: cargo clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: cargo test
+      - name: cargo clippy (macros feature)
+        run: cargo clippy --all-targets --features macros -- -D warnings
+
+      - name: cargo test (default features)
         run: cargo test
+
+      - name: cargo test (macros feature)
+        run: cargo test --features macros
+
+      - name: cargo build --release
+        run: cargo build --release

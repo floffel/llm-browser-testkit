@@ -13,9 +13,10 @@ llm-browser-testkit run smoke.toml
 # Install
 cargo install llm-browser-testkit
 
-# Point it at any OpenAI-compatible API
+# Set your LLM credentials (OpenAI-compatible API)
 export HARNESS_LLM_TEST_URL=https://api.openai.com
 export HARNESS_LLM_TEST_MODEL=gpt-4o-mini
+export HARNESS_LLM_API_KEY=sk-...
 
 # Run the built-in example (tests example.com — no account needed)
 llm-browser-testkit run examples/smoke.toml
@@ -97,6 +98,8 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 |------|---------|-------------|
 | `--llm-url` | `$HARNESS_LLM_TEST_URL` or `http://localhost:8080` | OpenAI-compatible endpoint |
 | `--llm-model` | `$HARNESS_LLM_TEST_MODEL` or `deepseek` | Model name |
+| `--llm-api-key` | `$HARNESS_LLM_API_KEY` | API key (Bearer token) |
+| `--llm-header` | — | Custom header `Name:Value` (repeatable) |
 | `--base-url` | `$HARNESS_BROWSER_BASE_URL` or `http://localhost:4200` | App under test |
 | `--headless` | `true` | Run Chrome headlessly |
 | `--timeout` | `60` | Seconds per action |
@@ -141,9 +144,74 @@ use llm_browser_testkit::scenario::Scenario;
 
 let scenario: Scenario = toml::from_str(&contents)?;
 let runner = ScenarioRunner::new(scenario.config.clone(), scenario.definitions);
-let report = runner.run(&scenario)?;
+let report = runner.run(&scenario.test)?;
 
 println!("Passed: {}, Failed: {}", report.tests_passed, report.tests_failed);
+```
+
+### Macros: `#[browser_test]` in `cargo test`
+
+Enable the `macros` feature to write browser tests directly in your Rust test
+modules:
+
+```toml
+[dev-dependencies]
+llm-browser-testkit = { version = "0.1", features = ["macros"] }
+```
+
+```rust,ignore
+use llm_browser_testkit::browser_test;
+use llm_browser_testkit::browser_test_inline;
+
+// Run a TOML scenario file
+browser_test!(homepage => "tests/homepage.toml");
+
+// Inline small scenarios
+browser_test_inline!(hello, r#"
+[config]
+base_url = "https://example.com"
+
+[[test]]
+name = "hello"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+
+[[test.steps]]
+kind = "assert"
+preset = "no_error_on_page"
+"#);
+```
+
+Tests auto-skip when no LLM endpoint or Chrome is available — safe to include in
+every CI run. They only execute with real `PASS`/`FAIL` when infrastructure is
+present.
+
+### LLM authentication
+
+The runner supports API keys and custom headers for SSO or alternative auth:
+
+```toml
+[config]
+llm_api_key = "sk-..."
+llm_headers = { "X-Org-ID" = "acme", "X-Project" = "qa" }
+```
+
+Via CLI:
+
+```bash
+llm-browser-testkit run tests.toml \
+  --llm-api-key sk-... \
+  --llm-header "X-Org-ID:acme" \
+  --llm-header "X-Project:qa"
+```
+
+Via env:
+
+```bash
+export HARNESS_LLM_API_KEY=sk-...
+export HARNESS_LLM_HEADERS='{"X-Org-ID":"acme","X-Project":"qa"}'
 ```
 
 ## License
