@@ -70,6 +70,7 @@ struct AssertPreset {
 }
 
 /// Built-in assertion presets.
+#[allow(clippy::literal_string_with_formatting_args)]
 const ASSERTION_PRESETS: &[AssertPreset] = &[
     AssertPreset {
         name: "no_error_on_page",
@@ -101,8 +102,7 @@ impl ScenarioRunner {
             .llm_model
             .clone()
             .unwrap_or_else(crate::llm_model);
-        let timeout =
-            Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60));
+        let timeout = Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60));
         let viewport_width = scenario_config.viewport_width.unwrap_or(1280);
         let viewport_height = scenario_config.viewport_height.unwrap_or(720);
         let defs_map: HashMap<String, AssertDefinition> = definitions
@@ -182,9 +182,7 @@ impl ScenarioRunner {
             .or_else(|| self.config.base_url.clone())
             .unwrap_or_else(crate::base_url);
 
-        let auto_navigate = test
-            .auto_navigate
-            .unwrap_or(self.config.auto_navigate);
+        let auto_navigate = test.auto_navigate.unwrap_or(self.config.auto_navigate);
 
         let start_url = test
             .start_url
@@ -444,22 +442,20 @@ impl ScenarioRunner {
         }
     }
 
-    fn run_assert_def(
-        &self,
-        def: &AssertDefinition,
-        page_content: &PageContent,
-    ) -> StepResult {
-        if let Some(ref preset_name) = def.preset {
-            self.run_preset(preset_name, def.assert_text.as_deref(), page_content)
-        } else if let Some(ref prompt) = def.prompt {
-            self.run_custom(prompt, page_content)
-        } else {
-            StepResult {
-                name: format!("[assert] {}", def.name),
-                status: StepStatus::Failed,
-                message: "definition has no preset or prompt".into(),
-            }
-        }
+    fn run_assert_def(&self, def: &AssertDefinition, page_content: &PageContent) -> StepResult {
+        def.preset.as_ref().map_or_else(
+            || {
+                def.prompt.as_ref().map_or_else(
+                    || StepResult {
+                        name: format!("[assert] {}", def.name),
+                        status: StepStatus::Failed,
+                        message: "definition has no preset or prompt".into(),
+                    },
+                    |prompt| self.run_custom(prompt, page_content),
+                )
+            },
+            |preset_name| self.run_preset(preset_name, def.assert_text.as_deref(), page_content),
+        )
     }
 
     fn run_preset(
@@ -501,14 +497,25 @@ impl ScenarioRunner {
                 .build()
                 .unwrap();
             rt.block_on(llm_chat(
-                &llm_url, &llm_model, timeout, &sys, &prompt, temperature, thinking,
+                &llm_url,
+                &llm_model,
+                timeout,
+                &sys,
+                &prompt,
+                temperature,
+                thinking,
             ))
         })
         .join()
         .unwrap();
 
-        match response {
-            Some(content) => {
+        response.map_or_else(
+            || StepResult {
+                name: format!("[assert] {preset_name}"),
+                status: StepStatus::Failed,
+                message: "LLM assertion call failed (server down?)".into(),
+            },
+            |content| {
                 let content_lower = content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
@@ -523,13 +530,8 @@ impl ScenarioRunner {
                         message: content,
                     }
                 }
-            }
-            None => StepResult {
-                name: format!("[assert] {preset_name}"),
-                status: StepStatus::Failed,
-                message: "LLM assertion call failed (server down?)".into(),
             },
-        }
+        )
     }
 
     fn run_custom(&self, prompt: &str, page_content: &PageContent) -> StepResult {
@@ -559,14 +561,25 @@ impl ScenarioRunner {
                 .build()
                 .unwrap();
             rt.block_on(llm_chat(
-                &llm_url, &llm_model, timeout, &sys, &user_prompt, temperature, thinking,
+                &llm_url,
+                &llm_model,
+                timeout,
+                &sys,
+                &user_prompt,
+                temperature,
+                thinking,
             ))
         })
         .join()
         .unwrap();
 
-        match response {
-            Some(content) => {
+        response.map_or_else(
+            || StepResult {
+                name: "[assert] custom".into(),
+                status: StepStatus::Failed,
+                message: "LLM assertion call failed (server down?)".into(),
+            },
+            |content| {
                 let content_lower = content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
@@ -581,13 +594,8 @@ impl ScenarioRunner {
                         message: content,
                     }
                 }
-            }
-            None => StepResult {
-                name: "[assert] custom".into(),
-                status: StepStatus::Failed,
-                message: "LLM assertion call failed (server down?)".into(),
             },
-        }
+        )
     }
 
     fn run_screenshot(path: Option<&str>, tab: &Tab) -> StepResult {
@@ -675,7 +683,13 @@ impl ScenarioRunner {
                 .build()
                 .unwrap();
             rt.block_on(llm_chat(
-                &llm_url, &llm_model, timeout, &sys, &user_prompt, temperature, thinking,
+                &llm_url,
+                &llm_model,
+                timeout,
+                &sys,
+                &user_prompt,
+                temperature,
+                thinking,
             ))
         })
         .join()

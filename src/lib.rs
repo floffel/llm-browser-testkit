@@ -28,8 +28,7 @@ use serde_json::Value;
 /// defaulting to `http://localhost:4200`.
 #[must_use]
 pub fn base_url() -> String {
-    std::env::var("HARNESS_BROWSER_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:4200".to_owned())
+    std::env::var("HARNESS_BROWSER_BASE_URL").unwrap_or_else(|_| "http://localhost:4200".to_owned())
 }
 
 /// Returns the LLM server base URL from `HARNESS_LLM_TEST_URL` env,

@@ -1,39 +1,30 @@
 # llm-browser-testkit
 
-LLM-driven browser test framework. Define browser test scenarios in TOML with
-natural language steps — the LLM resolves element descriptions to CSS selectors
-at runtime and evaluates assertions against page content.
-
-## How it works
+Describe browser tests in plain English. The LLM figures out which elements to
+click and whether the page looks right.
 
 ```
-TOML scenario  →  CLI runner  →  Chrome (CDP)  →  LLM (OpenAI-compatible API)
+llm-browser-testkit run smoke.toml
 ```
-
-1. **Write a TOML scenario** describing browser interactions in natural language
-   (click "the Login button", type into "the search field", etc.)
-2. **The CLI launches headless Chrome** via the Chrome DevTools Protocol
-3. **For each interactive step**, the LLM receives the page's DOM (interactive
-   elements) and resolves the natural language description to a CSS selector
-4. **For each assertion**, the LLM evaluates the page content against the
-   assertion prompt and responds PASS or FAIL
 
 ## Quick start
 
 ```bash
+# Install
 cargo install llm-browser-testkit
 
-# Point it at your LLM endpoint (OpenAI-compatible API)
+# Point it at any OpenAI-compatible API
 export HARNESS_LLM_TEST_URL=https://api.openai.com
 export HARNESS_LLM_TEST_MODEL=gpt-4o-mini
 
-# Run a scenario
+# Run the built-in example (tests example.com — no account needed)
 llm-browser-testkit run examples/smoke.toml
 ```
 
-## Scenario format
+## Write your first test
 
 ```toml
+# hello.toml
 [config]
 base_url = "https://example.com"
 timeout_secs = 30
@@ -53,44 +44,107 @@ url = "/"
 [[test.steps]]
 kind = "assert"
 definition = "no_errors"
-
-[[test.steps]]
-kind = "click"
-target = "the More information link"
-wait_after_ms = 1000
-
-[[test.steps]]
-kind = "screenshot"
-path = "result.png"
 ```
 
-## Step kinds
+Run it:
 
-| Kind | Description |
-|------|-------------|
-| `navigate` | Navigate to a URL (absolute or relative to `base_url`) |
-| `click` | Click an element described in natural language |
-| `type` | Type text into an input element |
-| `wait` | Wait for an element to appear |
-| `assert` | Evaluate an assertion (named definition, preset, or custom prompt) |
-| `screenshot` | Capture a PNG screenshot |
+```bash
+llm-browser-testkit run hello.toml
+```
 
-## Built-in assertion presets
+## Step reference
 
-| Preset | Description |
-|--------|-------------|
-| `no_error_on_page` | Fails if the page contains errors, stack traces, or malfunctions |
-| `text_visible` | Passes if the given text is found on the page |
-| `element_exists` | Passes if the described UI element exists |
+Every step has a `kind`. Required fields depend on the kind.
 
-## Environment variables
+| `kind` | What it does | Required | Optional |
+|--------|-------------|----------|----------|
+| `navigate` | Open a URL | `url` | `wait_after_ms` |
+| `click` | Click an element | `target` | `selector`, `wait_after_ms` |
+| `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms` |
+| `wait` | Wait for an element | `target` | `selector`, `timeout_ms` |
+| `assert` | Check the page | one of `definition`, `preset`, or `prompt` | `assert_text` |
+| `screenshot` | Save a .png | — | `path` |
 
-| Variable | Default |
-|----------|---------|
-| `HARNESS_BROWSER_BASE_URL` | `http://localhost:4200` |
-| `HARNESS_LLM_TEST_URL` | `http://localhost:8080` |
-| `HARNESS_LLM_TEST_MODEL` | `deepseek` |
-| `HARNESS_BROWSER_HEADLESS` | `true` |
+**`target`** is natural language ("the submit button", "the search input"). The
+LLM looks at the page DOM and picks the right CSS selector at runtime. Skip the
+LLM with an explicit `selector`.
+
+## Assertion presets
+
+Built-in presets you can use inline or from `[[definitions]]`.
+
+| Preset | What it checks |
+|--------|---------------|
+| `no_error_on_page` | No errors, stack traces, or broken UI on the page |
+| `text_visible` | Specific text appears on the page (`assert_text`) |
+| `element_exists` | A described UI element is present |
+
+Custom assertions with `prompt` send any question to the LLM:
+
+```toml
+[[test.steps]]
+kind = "assert"
+prompt = "Does the page have a heading that says 'Example Domain'?"
+```
+
+## CLI reference
+
+```
+llm-browser-testkit run <scenario.toml> [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--llm-url` | `$HARNESS_LLM_TEST_URL` or `http://localhost:8080` | OpenAI-compatible endpoint |
+| `--llm-model` | `$HARNESS_LLM_TEST_MODEL` or `deepseek` | Model name |
+| `--base-url` | `$HARNESS_BROWSER_BASE_URL` or `http://localhost:4200` | App under test |
+| `--headless` | `true` | Run Chrome headlessly |
+| `--timeout` | `60` | Seconds per action |
+| `--viewport-width` | `1280` | Browser width |
+| `--viewport-height` | `720` | Browser height |
+| `--start-url` | `/dashboard` | First page to load |
+
+CLI flags override the scenario `[config]`.
+
+## How it works
+
+Three pieces:
+
+1. **Chrome** — launched via the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
+   (`headless_chrome` crate). It navigates, clicks, types, and extracts page
+   content.
+
+2. **LLM** — any OpenAI-compatible API. Used in two places:
+   - **Element targeting**: when a step says `target = "the login button"`, the
+     runner sends the page's interactive elements to the LLM and asks for a CSS
+     selector.
+   - **Assertions**: the runner sends page content to the LLM with a QA prompt
+     and expects `PASS` or `FAIL: <reason>`.
+
+3. **TOML scenarios** — declarative test files. No code, no CSS selectors
+   required. Just describe what you want in English.
+
+```
+TOML file  →  CLI runner  →  Chrome (CDP)  →  LLM API
+```
+
+## Use as a library
+
+```toml
+[dependencies]
+llm-browser-testkit = "0.1"
+```
+
+```rust
+use llm_browser_testkit::runner::ScenarioRunner;
+use llm_browser_testkit::scenario::Scenario;
+
+let scenario: Scenario = toml::from_str(&contents)?;
+let runner = ScenarioRunner::new(scenario.config.clone(), scenario.definitions);
+let report = runner.run(&scenario)?;
+
+println!("Passed: {}, Failed: {}", report.tests_passed, report.tests_failed);
+```
 
 ## License
 

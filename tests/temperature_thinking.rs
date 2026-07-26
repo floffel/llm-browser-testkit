@@ -1,5 +1,12 @@
 //! Test that temperature and thinking are parsed from TOML and
-//! propagated through the ScenarioRunner to LLM calls.
+//! propagated through the `ScenarioRunner` to LLM calls.
+
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::missing_panics_doc
+)]
 
 use llm_browser_testkit::scenario::Scenario;
 

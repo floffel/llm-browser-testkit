@@ -83,8 +83,7 @@ async fn main() -> anyhow::Result<()> {
             let toml_content = std::fs::read_to_string(&scenario)
                 .with_context(|| format!("reading {}", scenario.display()))?;
             let mut scenario_def: llm_browser_testkit::scenario::Scenario =
-                toml::from_str(&toml_content)
-                    .with_context(|| "parsing scenario TOML")?;
+                toml::from_str(&toml_content).with_context(|| "parsing scenario TOML")?;
 
             // Build effective global config: CLI args override scenario [config]
             let mut config = scenario_def.config.clone();
@@ -93,15 +92,10 @@ async fn main() -> anyhow::Result<()> {
             config.llm_url = llm_url.or(config.llm_url);
             config.llm_model = llm_model.or(config.llm_model);
             config.browser_headless = Some(headless);
-            config.timeout_secs = Some(
-                timeout.max(config.timeout_secs.unwrap_or(60)),
-            );
-            config.viewport_width = Some(
-                viewport_width.max(config.viewport_width.unwrap_or(1280)),
-            );
-            config.viewport_height = Some(
-                viewport_height.max(config.viewport_height.unwrap_or(720)),
-            );
+            config.timeout_secs = Some(timeout.max(config.timeout_secs.unwrap_or(60)));
+            config.viewport_width = Some(viewport_width.max(config.viewport_width.unwrap_or(1280)));
+            config.viewport_height =
+                Some(viewport_height.max(config.viewport_height.unwrap_or(720)));
             // Only set start_url from CLI if scenario config didn't set one
             if config.start_url.is_none() {
                 config.start_url = Some(start_url);
@@ -134,8 +128,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let definitions = std::mem::take(&mut scenario_def.definitions);
-            let runner =
-                llm_browser_testkit::runner::ScenarioRunner::new(config, definitions);
+            let runner = llm_browser_testkit::runner::ScenarioRunner::new(config, definitions);
 
             let report = runner.run(&scenario_def)?;
 

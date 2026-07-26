@@ -1,5 +1,12 @@
 //! Integration tests validating TOML scenario files parse correctly.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::missing_panics_doc
+)]
+
 use std::fs;
 
 #[test]
@@ -15,8 +22,7 @@ fn validate_all_toml_scenarios() {
     ];
     for f in &files {
         let path = format!("{dir}/{f}");
-        let content =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+        let content = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
         let s: llm_browser_testkit::scenario::Scenario =
             toml::from_str(&content).unwrap_or_else(|e| panic!("parsing {path}: {e}"));
         assert!(!s.test.is_empty(), "{path}: no tests defined");
