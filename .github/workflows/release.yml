@@ -40,7 +40,7 @@ jobs:
         run: ${{ matrix.setup }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --all-features
 
       - name: Package (unix)
         if: runner.os != 'Windows'

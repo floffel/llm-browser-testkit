@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust (fmt / clippy / test)
+    name: Rust (fmt / clippy / test / coverage)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +20,7 @@ jobs:
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
 
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@v2
@@ -28,10 +28,10 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy (default features, lib+bin)
+        run: cargo clippy --lib --bin llm-browser-testkit -- -D warnings
 
-      - name: cargo clippy (macros feature)
+      - name: cargo clippy (macros feature, all targets)
         run: cargo clippy --all-targets --features macros -- -D warnings
 
       - name: cargo test (default features)
@@ -40,5 +40,55 @@ jobs:
       - name: cargo test (macros feature)
         run: cargo test --features macros
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
       - name: cargo build --release
         run: cargo build --release
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  check-deps:
+    name: Check dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: Install cargo-udeps
+        uses: taiki-e/install-action@cargo-udeps
+
+      - name: cargo udeps
+        run: cargo udeps --all-targets --all-features
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      - name: cargo hack check
+        run: cargo hack check --feature-powerset --depth 2
+
+  typos:
+    name: Spell check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run typos
+        uses: crate-ci/typos@v1.31.1

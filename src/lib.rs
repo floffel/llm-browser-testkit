@@ -3,6 +3,9 @@
 //! Provides reusable building blocks for browser-based test scenarios:
 //! - Browser client via Chrome `DevTools` Protocol (headless)
 //! - LLM client for natural language element targeting and assertions
+//! - A2A agent integration for agent-to-agent communication
+//! - MCP client/server integration for tool-calling
+//! - Cost tracking, token counting, and budget enforcement
 //! - Declarative TOML scenario runner
 //! - `#[browser_test]` macros for `cargo test` integration
 
@@ -13,6 +16,20 @@
     clippy::missing_panics_doc
 )]
 
+/// A2A agent protocol client.
+pub mod a2a;
+/// Budget tracking and enforcement.
+pub mod budgets;
+/// Cost calculation, usage tracking, and pricing.
+pub mod costs;
+/// Endpoint registry and routing resolver.
+pub mod endpoints;
+/// MCP client for connecting to external MCP servers.
+pub mod mcp_client;
+/// MCP server for exposing the framework as an MCP server.
+pub mod mcp_server;
+/// Cost and token report printer.
+pub mod reporting;
 /// Step-by-step scenario executor (navigate, click, type, wait, assert).
 pub mod runner;
 /// Declarative TOML-based test scenario types.
@@ -26,6 +43,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::Value;
+
+pub use costs::LlmResponse;
+pub use costs::LlmUsage;
 
 /// Configuration for the LLM client — bundles URL, model, auth, timeouts,
 /// and provider-specific options into a single struct passed everywhere.
@@ -69,7 +89,11 @@ impl LlmConfig {
     }
 }
 
-fn parse_headers_env() -> HashMap<String, String> {
+/// Parses `HARNESS_LLM_HEADERS` env var (JSON object) into a header map.
+///
+/// Exposed for use by `endpoints.rs` and tests.
+#[must_use]
+pub fn parse_headers_env() -> HashMap<String, String> {
     let Ok(raw) = std::env::var("HARNESS_LLM_HEADERS") else {
         return HashMap::new();
     };
@@ -128,7 +152,19 @@ pub fn http_client(timeout: Duration) -> reqwest::Client {
 /// Sends a chat completion request to the LLM.
 ///
 /// Returns `Some(content)` on success, `None` on any error.
+///
+/// Prefer `llm_chat_with_usage` if you need token counting.
+#[must_use]
 pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<String> {
+    llm_chat_with_usage(llm, system, user)
+        .await
+        .map(|r| r.content)
+}
+
+/// Sends a chat completion request to the LLM and returns both the content
+/// and token usage from the API response.
+#[must_use]
+pub async fn llm_chat_with_usage(llm: &LlmConfig, system: &str, user: &str) -> Option<LlmResponse> {
     let client = http_client(llm.timeout);
     let mut payload = serde_json::json!({
         "model": llm.model,
@@ -147,9 +183,6 @@ pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<Strin
         }
     }
     // Merge provider-specific parameters into the request body.
-    //
-    // This supports non-OpenAI params like Anthropic's `effort` or
-    // provider-specific reasoning controls.
     if !llm.model_params.is_empty() {
         if let Value::Object(ref mut map) = payload {
             for (key, val) in &llm.model_params {
@@ -170,9 +203,12 @@ pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<Strin
 
     let resp = req.json(&payload).send().await.ok()?;
     let json: Value = resp.json().await.ok()?;
-    json["choices"][0]["message"]["content"]
+    let usage = costs::extract_usage(&json);
+    let content = json["choices"][0]["message"]["content"]
         .as_str()
-        .map(String::from)
+        .map(String::from)?;
+
+    Some(LlmResponse { content, usage })
 }
 
 /// JavaScript to extract interactive elements from the current page.

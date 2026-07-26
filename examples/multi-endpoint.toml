@@ -1,0 +1,35 @@
+# Multi-endpoint scenario — routes LLM calls to different providers
+
+[config.endpoints.default]
+type = "llm"
+url = "http://localhost:8080"
+model = "deepseek"
+pricing = { input_per_1m_tokens = 0.15, output_per_1m_tokens = 0.60 }
+default_for = ["targeting", "assertion"]
+
+[config.budgets.global]
+max_cost = 10.0
+max_tokens = 1_000_000
+enforcement = "soft"
+
+[config.budgets.per_test_default]
+max_cost = 2.0
+max_tokens = 200_000
+enforcement = "hard"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[test]]
+name = "homepage smoke"
+start_url = "/"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+endpoint = "default"

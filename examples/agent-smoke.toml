@@ -1,0 +1,39 @@
+# Agent-to-agent scenario — uses an A2A agent for assertions
+
+[config.endpoints.audit_agent]
+type = "a2a"
+url = "http://localhost:9090"
+pricing = { per_call = 0.01 }
+
+[config.endpoints.default]
+type = "llm"
+url = "http://localhost:8080"
+model = "deepseek"
+pricing = { input_per_1m_tokens = 0.15, output_per_1m_tokens = 0.60 }
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[definitions]]
+name = "agent_verify"
+agent = "audit_agent"
+task_template = "Check if the page at {url} with title '{title}' shows the following: {expected_text}"
+
+[[test]]
+name = "agent smoke test"
+start_url = "/"
+budget = { max_cost = 1.0, enforcement = "hard" }
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "agent"
+agent = "audit_agent"
+task = "Verify the homepage loads without errors"

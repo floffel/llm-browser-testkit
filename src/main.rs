@@ -31,7 +31,8 @@ enum Command {
         /// Path to the scenario file.
         scenario: PathBuf,
 
-        /// Base URL for relative navigation (default: `HARNESS_BROWSER_BASE_URL` or localhost:4200).
+        /// Base URL for relative navigation
+        /// (default: `HARNESS_BROWSER_BASE_URL` or localhost:4200).
         #[arg(long, env = "HARNESS_BROWSER_BASE_URL")]
         base_url: Option<String>,
 
@@ -47,7 +48,8 @@ enum Command {
         #[arg(long, env = "HARNESS_LLM_API_KEY")]
         llm_api_key: Option<String>,
 
-        /// Custom HTTP header `Name:Value` (repeatable, e.g. `--llm-header "X-Org:acme"`).
+        /// Custom HTTP header `Name:Value`
+        /// (repeatable, e.g. `--llm-header "X-Org:acme"`).
         #[arg(long = "llm-header", value_parser = parse_header)]
         llm_headers: Vec<(String, String)>,
 
@@ -75,6 +77,18 @@ enum Command {
         /// Default start URL for test auto-navigation (default: /dashboard).
         #[arg(long, default_value = "/dashboard")]
         start_url: String,
+
+        /// Global max cost in USD across all tests. Exceeding this aborts.
+        #[arg(long)]
+        max_cost: Option<f64>,
+
+        /// Global max tokens across all tests. Exceeding this aborts.
+        #[arg(long)]
+        max_tokens: Option<u64>,
+
+        /// Budget enforcement mode: `hard` (abort) or `soft` (warn).
+        #[arg(long)]
+        budget_enforcement: Option<String>,
     },
 }
 
@@ -101,6 +115,7 @@ fn parse_model_param(s: &str) -> Result<(String, Value), String> {
 }
 
 #[tokio::main(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -118,6 +133,9 @@ async fn main() -> anyhow::Result<()> {
             viewport_width,
             viewport_height,
             start_url,
+            max_cost,
+            max_tokens,
+            budget_enforcement,
         } => {
             let toml_content = std::fs::read_to_string(&scenario)
                 .with_context(|| format!("reading {}", scenario.display()))?;
@@ -150,17 +168,56 @@ async fn main() -> anyhow::Result<()> {
             config.viewport_width = Some(viewport_width.max(config.viewport_width.unwrap_or(1280)));
             config.viewport_height =
                 Some(viewport_height.max(config.viewport_height.unwrap_or(720)));
-            // Only set start_url from CLI if scenario config didn't set one
             if config.start_url.is_none() {
                 config.start_url = Some(start_url);
             }
 
+            // CLI budget overrides
+            let enforce = budget_enforcement
+                .as_deref()
+                .map(|e| match e.to_lowercase().as_str() {
+                    "soft" => llm_browser_testkit::scenario::BudgetEnforcement::Soft,
+                    _ => llm_browser_testkit::scenario::BudgetEnforcement::Hard,
+                });
+            if max_cost.is_some() || max_tokens.is_some() || enforce.is_some() {
+                let global =
+                    config
+                        .budgets
+                        .global
+                        .get_or_insert(llm_browser_testkit::scenario::BudgetDef {
+                            max_cost: None,
+                            max_tokens: None,
+                            max_calls: None,
+                            enforcement: None,
+                        });
+                if let Some(mc) = max_cost {
+                    global.max_cost = Some(mc);
+                }
+                if let Some(mt) = max_tokens {
+                    global.max_tokens = Some(mt);
+                }
+                if let Some(e) = enforce {
+                    global.enforcement = Some(e);
+                }
+            }
+
             eprintln!("Base URL: {}", config.base_url.as_deref().unwrap_or("—"));
-            eprintln!(
-                "LLM: {} ({})",
-                config.llm_url.as_deref().unwrap_or("—"),
-                config.llm_model.as_deref().unwrap_or("—"),
-            );
+            eprintln!("Endpoints: {} configured", config.endpoints.len());
+            if config.endpoints.is_empty() {
+                eprintln!(
+                    "  (using default LLM: {} @ {})",
+                    config.llm_model.as_deref().unwrap_or("—"),
+                    config.llm_url.as_deref().unwrap_or("—"),
+                );
+            } else {
+                for (name, ep) in &config.endpoints {
+                    eprintln!(
+                        "  {name}: {type:?} @ {url}",
+                        type = ep.endpoint_type,
+                        url = ep.url.as_deref().unwrap_or("(subprocess)")
+                    );
+                }
+            }
             eprintln!(
                 "Browser: {} ({}x{})",
                 if config.browser_headless.unwrap_or(true) {
@@ -180,6 +237,22 @@ async fn main() -> anyhow::Result<()> {
                 scenario_def.test.len(),
                 scenario_def.definitions.len(),
             );
+            if let Some(ref global_budget) = config.budgets.global {
+                if let Some(cost) = global_budget.max_cost {
+                    eprintln!("Budget (global): max ${cost:.2}");
+                }
+                if let Some(tokens) = global_budget.max_tokens {
+                    eprintln!("Budget (global): max {tokens} tokens");
+                }
+            }
+            if let Some(ref per_test) = config.budgets.per_test_default {
+                if let Some(cost) = per_test.max_cost {
+                    eprintln!("Budget (per-test default): max ${cost:.2}");
+                }
+                if let Some(tokens) = per_test.max_tokens {
+                    eprintln!("Budget (per-test default): max {tokens} tokens");
+                }
+            }
 
             let definitions = std::mem::take(&mut scenario_def.definitions);
             let runner = llm_browser_testkit::runner::ScenarioRunner::new(config, definitions);
@@ -197,6 +270,12 @@ async fn main() -> anyhow::Result<()> {
                 passed = report.passed,
                 failed = report.failed,
                 skipped = report.skipped,
+            );
+
+            // Print cost report
+            llm_browser_testkit::reporting::print_report(
+                &runner.usage_tracker().per_test_snapshots(),
+                &runner.usage_tracker().global_snapshot(),
             );
 
             if report.failed > 0 {

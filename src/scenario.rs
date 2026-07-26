@@ -41,6 +41,8 @@
 //! | `wait`        | `target`        | `selector`, `timeout_ms`                 |
 //! | `assert`      | *one of below*  | —                                        |
 //! | `screenshot`  | —               | `path`                                   |
+//! | `agent`       | `agent`, `task` | —                                        |
+//! | `mcp`         | `server`, `tool`| `args`                                   |
 //!
 //! Assert steps require one of: `definition` (references a named
 //! `[[definitions]]` entry), `preset` (built-in preset name), or `prompt`
@@ -71,10 +73,13 @@ pub struct Scenario {
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct ScenarioConfig {
     /// Base URL for relative navigation.
+    #[serde(default)]
     pub base_url: Option<String>,
-    /// LLM server base URL.
+    /// LLM server base URL (deprecated; prefer `[config.endpoints]`).
+    #[serde(default)]
     pub llm_url: Option<String>,
-    /// LLM model name.
+    /// LLM model name (deprecated; prefer `[config.endpoints]`).
+    #[serde(default)]
     pub llm_model: Option<String>,
     /// LLM API key (Bearer token).
     #[serde(default)]
@@ -83,16 +88,22 @@ pub struct ScenarioConfig {
     #[serde(default, deserialize_with = "deserialize_headers")]
     pub llm_headers: HashMap<String, String>,
     /// Run browser in headless mode.
+    #[serde(default)]
     pub browser_headless: Option<bool>,
     /// HTTP / browser action timeout in seconds.
+    #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Browser viewport width.
+    #[serde(default)]
     pub viewport_width: Option<u32>,
     /// Browser viewport height.
+    #[serde(default)]
     pub viewport_height: Option<u32>,
     /// Default URL every test auto-navigates to before running its steps.
+    #[serde(default)]
     pub start_url: Option<String>,
     /// Whether to auto-navigate to `start_url` before test steps.
+    ///
     /// Disable when a test starts with click-based navigation.
     #[serde(default = "default_auto_navigate")]
     pub auto_navigate: bool,
@@ -108,6 +119,127 @@ pub struct ScenarioConfig {
     /// request body (e.g. `effort = "high"` for Anthropic).
     #[serde(default, deserialize_with = "deserialize_model_params")]
     pub model_params: HashMap<String, Value>,
+    /// Named endpoints (LLM, MCP, A2A agents) with pricing.
+    #[serde(default)]
+    pub endpoints: HashMap<String, EndpointConfig>,
+    /// Global and per-test budgets for cost/token/call limits.
+    #[serde(default)]
+    pub budgets: BudgetsConfig,
+    /// MCP server exposure configuration.
+    #[serde(default)]
+    pub mcp_server: Option<McpServerConfig>,
+}
+
+/// A named endpoint definition with pricing.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EndpointConfig {
+    /// Endpoint type: `llm`, `mcp`, or `a2a`.
+    #[serde(rename = "type")]
+    pub endpoint_type: EndpointType,
+    /// Base URL for the endpoint.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Model name (LLM endpoints only).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API key / bearer token.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Custom HTTP headers as JSON key-value pairs.
+    #[serde(default, deserialize_with = "deserialize_headers")]
+    pub headers: HashMap<String, String>,
+    /// Pricing configuration.
+    #[serde(default)]
+    pub pricing: Option<PricingConfig>,
+    /// Task types this endpoint serves by default
+    /// (e.g. `["targeting", "assertion"]`).
+    #[serde(default)]
+    pub default_for: Vec<String>,
+    /// Command to launch an MCP server subprocess (stdio transport).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments for the MCP server command.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Type discriminator for endpoint configuration.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointType {
+    /// OpenAI-compatible LLM API.
+    Llm,
+    /// Model Context Protocol server.
+    Mcp,
+    /// Agent-to-Agent protocol agent.
+    A2a,
+}
+
+/// Pricing configuration for an endpoint.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PricingConfig {
+    /// Cost per 1M input tokens (USD).
+    #[serde(default)]
+    pub input_per_1m_tokens: f64,
+    /// Cost per 1M output tokens (USD).
+    #[serde(default)]
+    pub output_per_1m_tokens: f64,
+    /// Flat cost per call (USD), used for MCP/agent endpoints.
+    #[serde(default)]
+    pub per_call: f64,
+}
+
+/// Budget limits for test execution.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct BudgetsConfig {
+    /// Global budget across all tests in the scenario.
+    #[serde(default)]
+    pub global: Option<BudgetDef>,
+    /// Default per-test budget. Individual tests can override.
+    #[serde(default)]
+    pub per_test_default: Option<BudgetDef>,
+}
+
+/// A budget definition with limits and enforcement mode.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BudgetDef {
+    /// Maximum cost in USD.
+    #[serde(default)]
+    pub max_cost: Option<f64>,
+    /// Maximum total tokens (input + output).
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    /// Maximum number of calls (LLM, MCP, agent combined).
+    #[serde(default)]
+    pub max_calls: Option<u64>,
+    /// Enforcement mode: `hard` (abort) or `soft` (warn and continue).
+    #[serde(default)]
+    pub enforcement: Option<BudgetEnforcement>,
+}
+
+/// Budget enforcement strategy.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetEnforcement {
+    /// Abort the test or run when budget is exceeded.
+    Hard,
+    /// Log a warning but continue execution.
+    Soft,
+}
+
+/// MCP server exposure configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct McpServerConfig {
+    /// Whether to enable the embedded MCP server.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port to listen on.
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+}
+
+const fn default_mcp_port() -> u16 {
+    3000
 }
 
 fn deserialize_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
@@ -163,7 +295,8 @@ where
 pub struct AssertDefinition {
     /// Unique name used to reference this definition from steps.
     pub name: String,
-    /// Predefined assertion preset name (e.g. `no_error_on_page`, `text_visible`).
+    /// Predefined assertion preset name
+    /// (e.g. `no_error_on_page`, `text_visible`).
     #[serde(default)]
     pub preset: Option<String>,
     /// Custom LLM prompt for assertion evaluation.
@@ -179,6 +312,12 @@ pub struct AssertDefinition {
     /// `{expected_text}` placeholder value for custom presets.
     #[serde(default)]
     pub assert_text: Option<String>,
+    /// Agent endpoint to call for this assertion.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Agent task template for this assertion.
+    #[serde(default)]
+    pub task_template: Option<String>,
 }
 
 /// A group of steps that form a single test scenario.
@@ -201,6 +340,13 @@ pub struct TestGroup {
     /// Override the global `browser_headless` for this test.
     #[serde(default)]
     pub browser_headless: Option<bool>,
+    /// Per-test budget override.
+    #[serde(default)]
+    pub budget: Option<BudgetDef>,
+    /// Endpoint to use for all steps in this test (can be overridden
+    /// per-step).
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// Ordered steps to execute.
     #[serde(default)]
     pub steps: Vec<TestStep>,
@@ -214,7 +360,8 @@ pub enum TestStep {
     /// Navigate the browser to a URL.
     #[serde(rename = "navigate")]
     Navigate {
-        /// URL to navigate to (absolute, or relative to the test's base URL).
+        /// URL to navigate to (absolute, or relative to the test's base
+        /// URL).
         url: String,
         /// Milliseconds to wait after navigation completes.
         #[serde(default)]
@@ -224,8 +371,8 @@ pub enum TestStep {
     /// Click an element described in natural language.
     #[serde(rename = "click")]
     Click {
-        /// Natural language description of the element. The LLM resolves this
-        /// to a CSS selector at runtime.
+        /// Natural language description of the element. The LLM resolves
+        /// this to a CSS selector at runtime.
         target: String,
         /// Explicit CSS selector override (bypasses LLM resolution).
         #[serde(default)]
@@ -233,6 +380,9 @@ pub enum TestStep {
         /// Milliseconds to wait after the click.
         #[serde(default)]
         wait_after_ms: Option<u64>,
+        /// Endpoint to use for LLM element targeting.
+        #[serde(default)]
+        endpoint: Option<String>,
     },
 
     /// Type text into an input element.
@@ -248,6 +398,9 @@ pub enum TestStep {
         /// Milliseconds to wait after typing.
         #[serde(default)]
         wait_after_ms: Option<u64>,
+        /// Endpoint to use for LLM element targeting.
+        #[serde(default)]
+        endpoint: Option<String>,
     },
 
     /// Wait for an element to appear on the page.
@@ -261,6 +414,9 @@ pub enum TestStep {
         /// Maximum milliseconds to wait (default: 10000).
         #[serde(default)]
         timeout_ms: Option<u64>,
+        /// Endpoint to use for LLM element targeting.
+        #[serde(default)]
+        endpoint: Option<String>,
     },
 
     /// Evaluate an assertion against the current page content.
@@ -278,6 +434,9 @@ pub enum TestStep {
         /// Text that the `text_visible` preset checks for.
         #[serde(default)]
         assert_text: Option<String>,
+        /// Endpoint to use for this assertion's LLM call.
+        #[serde(default)]
+        endpoint: Option<String>,
     },
 
     /// Take a screenshot of the current page.
@@ -286,5 +445,29 @@ pub enum TestStep {
         /// File path to save the screenshot (default: `screenshot.png`).
         #[serde(default)]
         path: Option<String>,
+    },
+
+    /// Call an A2A agent with a task.
+    #[serde(rename = "agent")]
+    Agent {
+        /// Name of the agent endpoint to call.
+        agent: String,
+        /// Task description / prompt for the agent.
+        task: String,
+        /// Optional definition name with a task template.
+        #[serde(default)]
+        definition: Option<String>,
+    },
+
+    /// Call an MCP server tool.
+    #[serde(rename = "mcp")]
+    Mcp {
+        /// Name of the MCP server endpoint.
+        server: String,
+        /// Tool name to invoke on the server.
+        tool: String,
+        /// Tool arguments as JSON.
+        #[serde(default)]
+        args: Option<serde_json::Value>,
     },
 }

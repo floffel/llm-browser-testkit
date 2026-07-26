@@ -13,6 +13,7 @@ readme = "README.md"
 [features]
 default = []
 macros = []
+mcp-server = []
 
 [[bin]]
 name = "llm-browser-testkit"

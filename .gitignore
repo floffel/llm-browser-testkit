@@ -4,3 +4,4 @@ target/
 *.pid
 *.log
 smoke-result.png
+.kilo/

@@ -1,10 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 
-use crate::llm_chat;
+use crate::a2a::A2aClient;
+use crate::budgets::{BudgetStatus, BudgetTracker};
+use crate::costs::UsageTracker;
+use crate::endpoints::{EndpointRegistry, TaskType};
+use crate::llm_chat_with_usage;
+use crate::mcp_client::McpClient;
 use crate::scenario::{AssertDefinition, ScenarioConfig, TestGroup, TestStep};
 use crate::truncate;
 use crate::LlmConfig;
@@ -19,6 +25,9 @@ pub struct ScenarioRunner {
     timeout: Duration,
     viewport_width: u32,
     viewport_height: u32,
+    endpoints: EndpointRegistry,
+    usage: Arc<UsageTracker>,
+    budgets: BudgetTracker,
 }
 
 /// Aggregated results from a scenario run.
@@ -92,6 +101,9 @@ impl ScenarioRunner {
     /// assertion definitions.
     #[must_use]
     pub fn new(scenario_config: ScenarioConfig, definitions: Vec<AssertDefinition>) -> Self {
+        let endpoints = EndpointRegistry::from_config(&scenario_config.endpoints);
+        let budgets = BudgetTracker::from_config(&scenario_config.budgets);
+
         let llm = LlmConfig {
             url: scenario_config
                 .llm_url
@@ -115,22 +127,34 @@ impl ScenarioRunner {
             thinking: scenario_config.thinking,
             model_params: scenario_config.model_params.clone(),
         };
-        let timeout = Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60));
-        let viewport_width = scenario_config.viewport_width.unwrap_or(1280);
-        let viewport_height = scenario_config.viewport_height.unwrap_or(720);
         let defs_map: HashMap<String, AssertDefinition> = definitions
             .into_iter()
             .map(|d| (d.name.clone(), d))
             .collect();
 
         Self {
+            timeout: Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60)),
+            viewport_width: scenario_config.viewport_width.unwrap_or(1280),
+            viewport_height: scenario_config.viewport_height.unwrap_or(720),
             config: scenario_config,
             definitions: defs_map,
             llm,
-            timeout,
-            viewport_width,
-            viewport_height,
+            endpoints,
+            usage: Arc::new(UsageTracker::new()),
+            budgets,
         }
+    }
+
+    /// Returns a clone of the [`UsageTracker`] for reporting.
+    #[must_use]
+    pub fn usage_tracker(&self) -> Arc<UsageTracker> {
+        Arc::clone(&self.usage)
+    }
+
+    /// Returns a reference to the [`BudgetTracker`].
+    #[must_use]
+    pub const fn budget_tracker(&self) -> &BudgetTracker {
+        &self.budgets
     }
 
     /// Executes all test groups in the scenario and returns a report.
@@ -138,6 +162,7 @@ impl ScenarioRunner {
     /// # Errors
     ///
     /// Returns an error if the browser fails to launch.
+    #[allow(clippy::too_many_lines)]
     pub fn run(&self, tests: &[TestGroup]) -> anyhow::Result<RunReport> {
         let mut report = RunReport::default();
 
@@ -159,18 +184,43 @@ impl ScenarioRunner {
         let tab = browser.new_tab().context("failed to open browser tab")?;
         let _ = tab.set_default_timeout(self.timeout);
 
+        // Start MCP server if configured
+        #[cfg(feature = "mcp-server")]
+        if let Some(ref mcp_cfg) = self.config.mcp_server {
+            if mcp_cfg.enabled {
+                let port = mcp_cfg.port;
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let _ = rt.block_on(crate::mcp_server::start_mcp_server(port));
+                });
+            }
+        }
+        #[cfg(not(feature = "mcp-server"))]
+        if let Some(mcp_cfg) = &self.config.mcp_server {
+            if mcp_cfg.enabled {
+                eprintln!("  ⚠️  MCP server configured but 'mcp-server' feature not enabled");
+            }
+        }
+
         for test in tests {
-            eprintln!("\n══════════════════════════════");
-            eprintln!("  TEST: {}", test.name);
-            eprintln!("══════════════════════════════");
+            eprintln!("\n╔══════════════════════════════");
+            eprintln!("║  Test: {}", test.name);
+            eprintln!("╚══════════════════════════════");
+
+            self.usage.reset_per_test();
 
             let test_result = self.run_test(test, &tab);
+            self.usage.commit_test(&test.name);
+
             if test_result.failed == 0 && test_result.total > 0 {
                 report.tests_passed += 1;
-                eprintln!("  TEST ✅ PASSED");
+                eprintln!("  Test ✅ Passed");
             } else if test_result.total > 0 {
                 report.tests_failed += 1;
-                eprintln!("  TEST ❌ FAILED");
+                eprintln!("  Test ❌ Failed");
             }
 
             report.passed += test_result.passed;
@@ -182,6 +232,7 @@ impl ScenarioRunner {
         Ok(report)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn run_test(&self, test: &TestGroup, tab: &Tab) -> TestRunResult {
         let base_url = test
             .base_url
@@ -205,18 +256,11 @@ impl ScenarioRunner {
             std::thread::sleep(Duration::from_secs(4));
         }
 
-        let mut result = TestRunResult {
-            passed: 0,
-            failed: 0,
-            skipped: 0,
-            total: 0,
-            details: Vec::new(),
-        };
+        let mut result = TestRunResult::default();
 
         for step in &test.steps {
             result.total += 1;
 
-            // Extract per-step wait_after_ms before the step consumes the data
             let wait_ms = match step {
                 TestStep::Navigate { wait_after_ms, .. }
                 | TestStep::Click { wait_after_ms, .. }
@@ -230,32 +274,66 @@ impl ScenarioRunner {
                     run_navigate_step(&full_url, tab)
                 }
                 TestStep::Click {
-                    target, selector, ..
-                } => self.run_click(target, selector.as_deref(), tab),
+                    target,
+                    selector,
+                    endpoint,
+                    ..
+                } => self.run_click(
+                    target,
+                    selector.as_deref(),
+                    endpoint.as_deref(),
+                    test.endpoint.as_deref(),
+                    tab,
+                ),
                 TestStep::Type {
                     target,
                     text,
                     selector,
+                    endpoint,
                     ..
-                } => self.run_type(target, text, selector.as_deref(), tab),
+                } => self.run_type(
+                    target,
+                    text,
+                    selector.as_deref(),
+                    endpoint.as_deref(),
+                    test.endpoint.as_deref(),
+                    tab,
+                ),
                 TestStep::Wait {
                     target,
                     selector,
                     timeout_ms,
-                } => self.run_wait(target, selector.as_deref(), *timeout_ms, tab),
+                    endpoint,
+                } => self.run_wait(
+                    target,
+                    selector.as_deref(),
+                    *timeout_ms,
+                    endpoint.as_deref(),
+                    test.endpoint.as_deref(),
+                    tab,
+                ),
                 TestStep::Assert {
                     definition,
                     preset,
                     prompt,
                     assert_text,
+                    endpoint,
                 } => self.run_assert(
                     definition.as_deref(),
                     preset.as_deref(),
                     prompt.as_deref(),
                     assert_text.as_deref(),
+                    endpoint.as_deref(),
+                    test.endpoint.as_deref(),
                     tab,
                 ),
                 TestStep::Screenshot { path } => Self::run_screenshot(path.as_deref(), tab),
+                TestStep::Agent {
+                    agent,
+                    task,
+                    definition,
+                } => self.run_agent(agent, task, definition.as_deref(), test.endpoint.as_deref()),
+                TestStep::Mcp { server, tool, args } => self.run_mcp(server, tool, args.as_ref()),
             };
 
             eprintln!(
@@ -277,6 +355,32 @@ impl ScenarioRunner {
                 StepStatus::Skipped => result.skipped += 1,
             }
 
+            // Check per-test budget after each step
+            let test_usage = self.usage.current_test_snapshot();
+            let global_usage = self.usage.global_snapshot();
+            let budget_status = self.budgets.check_all(
+                &test.name,
+                &test_usage,
+                &global_usage,
+                test.budget.as_ref(),
+            );
+            match budget_status {
+                BudgetStatus::HardExceeded { message, .. } => {
+                    crate::reporting::print_budget_error(&message);
+                    result.details.push(StepResult {
+                        name: "[budget]".into(),
+                        status: StepStatus::Failed,
+                        message,
+                    });
+                    result.failed += 1;
+                    return result;
+                }
+                BudgetStatus::SoftExceeded { message, .. } => {
+                    crate::reporting::print_budget_warning(&message);
+                }
+                BudgetStatus::Ok => {}
+            }
+
             if let Some(ms) = wait_ms {
                 std::thread::sleep(Duration::from_millis(ms));
             }
@@ -289,8 +393,21 @@ impl ScenarioRunner {
 
     // ── step handlers ───────────────────────────────────────────────────
 
-    fn run_click(&self, target: &str, selector_override: Option<&str>, tab: &Tab) -> StepResult {
-        let selector = match self.resolve_selector(selector_override, target, tab) {
+    fn run_click(
+        &self,
+        target: &str,
+        selector_override: Option<&str>,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
+        tab: &Tab,
+    ) -> StepResult {
+        let selector = match self.resolve_selector(
+            selector_override,
+            target,
+            step_endpoint,
+            test_endpoint,
+            tab,
+        ) {
             Ok(s) => s,
             Err(msg) => {
                 return StepResult {
@@ -322,14 +439,23 @@ impl ScenarioRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_type(
         &self,
         target: &str,
         text: &str,
         selector_override: Option<&str>,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
         tab: &Tab,
     ) -> StepResult {
-        let selector = match self.resolve_selector(selector_override, target, tab) {
+        let selector = match self.resolve_selector(
+            selector_override,
+            target,
+            step_endpoint,
+            test_endpoint,
+            tab,
+        ) {
             Ok(s) => s,
             Err(msg) => {
                 return StepResult {
@@ -377,14 +503,23 @@ impl ScenarioRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_wait(
         &self,
         target: &str,
         selector_override: Option<&str>,
         timeout_ms: Option<u64>,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
         tab: &Tab,
     ) -> StepResult {
-        let selector = match self.resolve_selector(selector_override, target, tab) {
+        let selector = match self.resolve_selector(
+            selector_override,
+            target,
+            step_endpoint,
+            test_endpoint,
+            tab,
+        ) {
             Ok(s) => s,
             Err(msg) => {
                 return StepResult {
@@ -411,12 +546,15 @@ impl ScenarioRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_assert(
         &self,
         definition: Option<&str>,
         preset: Option<&str>,
         prompt: Option<&str>,
         assert_text: Option<&str>,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
         tab: &Tab,
     ) -> StepResult {
         std::thread::sleep(Duration::from_millis(500));
@@ -425,7 +563,7 @@ impl ScenarioRunner {
 
         if let Some(def_name) = definition {
             if let Some(def) = self.definitions.get(def_name) {
-                return self.run_assert_def(def, &page_content);
+                return self.run_assert_def(def, &page_content, step_endpoint, test_endpoint);
             }
             return StepResult {
                 name: format!("[assert] {def_name}"),
@@ -435,11 +573,17 @@ impl ScenarioRunner {
         }
 
         if let Some(preset_name) = preset {
-            return self.run_preset(preset_name, assert_text, &page_content);
+            return self.run_preset(
+                preset_name,
+                assert_text,
+                &page_content,
+                step_endpoint,
+                test_endpoint,
+            );
         }
 
         if let Some(prompt_text) = prompt {
-            return self.run_custom(prompt_text, &page_content);
+            return self.run_custom(prompt_text, &page_content, step_endpoint, test_endpoint);
         }
 
         StepResult {
@@ -449,7 +593,27 @@ impl ScenarioRunner {
         }
     }
 
-    fn run_assert_def(&self, def: &AssertDefinition, page_content: &PageContent) -> StepResult {
+    fn run_assert_def(
+        &self,
+        def: &AssertDefinition,
+        page_content: &PageContent,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
+    ) -> StepResult {
+        // Agent-based definition: delegate to an A2A agent
+        if let Some(ref agent) = def.agent {
+            let task = def
+                .task_template
+                .as_deref()
+                .unwrap_or("Evaluate the assertion")
+                .replace("{url}", &page_content.url)
+                .replace("{title}", &page_content.title)
+                .replace("{content}", &page_content.body_text)
+                .replace("{expected_text}", def.assert_text.as_deref().unwrap_or(""));
+
+            return self.run_agent_step(agent, &task, &def.name);
+        }
+
         // Custom preset: system + user_template provided in the definition
         if let (Some(system), Some(template)) = (&def.system, &def.user_template) {
             return self.run_custom_preset(
@@ -458,6 +622,8 @@ impl ScenarioRunner {
                 template,
                 def.assert_text.as_deref(),
                 page_content,
+                step_endpoint,
+                test_endpoint,
             );
         }
 
@@ -469,13 +635,22 @@ impl ScenarioRunner {
                         status: StepStatus::Failed,
                         message: "definition has no preset, prompt, or system+user_template".into(),
                     },
-                    |prompt| self.run_custom(prompt, page_content),
+                    |prompt| self.run_custom(prompt, page_content, step_endpoint, test_endpoint),
                 )
             },
-            |preset_name| self.run_preset(preset_name, def.assert_text.as_deref(), page_content),
+            |preset_name| {
+                self.run_preset(
+                    preset_name,
+                    def.assert_text.as_deref(),
+                    page_content,
+                    step_endpoint,
+                    test_endpoint,
+                )
+            },
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_custom_preset(
         &self,
         name: &str,
@@ -483,6 +658,8 @@ impl ScenarioRunner {
         template: &str,
         assert_text: Option<&str>,
         page_content: &PageContent,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
     ) -> StepResult {
         let user_prompt = template
             .replace("{url}", &page_content.url)
@@ -493,13 +670,20 @@ impl ScenarioRunner {
 
         eprintln!("      assert: {name} (custom preset)");
 
-        let (llm, sys, prompt) = (self.llm.clone(), system.to_owned(), user_prompt);
+        let endpoint = self
+            .endpoints
+            .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
+        let llm = self.build_llm_for_endpoint(endpoint);
+        let usage = Arc::clone(&self.usage);
+        let endpoint_name = endpoint.name.clone();
+        let sys = system.to_owned();
+
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(&llm, &sys, &prompt))
+            rt.block_on(llm_chat_with_usage(&llm, &sys, &user_prompt))
         })
         .join()
         .unwrap();
@@ -510,8 +694,14 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: "LLM assertion call failed (server down?)".into(),
             },
-            |content| {
-                let content_lower = content.to_lowercase().trim().to_owned();
+            |lr| {
+                usage.record_llm_call(
+                    &endpoint_name,
+                    endpoint,
+                    lr.usage.prompt_tokens,
+                    lr.usage.completion_tokens,
+                );
+                let content_lower = lr.content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
                         name: format!("[assert] {name}"),
@@ -522,7 +712,7 @@ impl ScenarioRunner {
                     StepResult {
                         name: format!("[assert] {name}"),
                         status: StepStatus::Failed,
-                        message: content,
+                        message: lr.content,
                     }
                 }
             },
@@ -534,6 +724,8 @@ impl ScenarioRunner {
         preset_name: &str,
         assert_text: Option<&str>,
         page_content: &PageContent,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
     ) -> StepResult {
         let Some(preset) = ASSERTION_PRESETS.iter().find(|p| p.name == preset_name) else {
             return StepResult {
@@ -553,13 +745,20 @@ impl ScenarioRunner {
 
         eprintln!("      assert: {preset_name}");
 
-        let (llm, sys, prompt) = (self.llm.clone(), preset.system.to_owned(), user_prompt);
+        let endpoint = self
+            .endpoints
+            .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
+        let llm = self.build_llm_for_endpoint(endpoint);
+        let usage = Arc::clone(&self.usage);
+        let endpoint_name = endpoint.name.clone();
+        let sys = preset.system.to_owned();
+
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(&llm, &sys, &prompt))
+            rt.block_on(llm_chat_with_usage(&llm, &sys, &user_prompt))
         })
         .join()
         .unwrap();
@@ -570,8 +769,14 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: "LLM assertion call failed (server down?)".into(),
             },
-            |content| {
-                let content_lower = content.to_lowercase().trim().to_owned();
+            |lr| {
+                usage.record_llm_call(
+                    &endpoint_name,
+                    endpoint,
+                    lr.usage.prompt_tokens,
+                    lr.usage.completion_tokens,
+                );
+                let content_lower = lr.content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
                         name: format!("[assert] {preset_name}"),
@@ -582,14 +787,20 @@ impl ScenarioRunner {
                     StepResult {
                         name: format!("[assert] {preset_name}"),
                         status: StepStatus::Failed,
-                        message: content,
+                        message: lr.content,
                     }
                 }
             },
         )
     }
 
-    fn run_custom(&self, prompt: &str, page_content: &PageContent) -> StepResult {
+    fn run_custom(
+        &self,
+        prompt: &str,
+        page_content: &PageContent,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
+    ) -> StepResult {
         let system = "You are a QA tester evaluating a web page. Respond with exactly \"PASS\" if the assertion holds, or \"FAIL: <reason>\" if it does not.";
 
         let user = format!(
@@ -601,13 +812,20 @@ impl ScenarioRunner {
 
         eprintln!("      custom assert");
 
-        let (llm, sys, user_prompt) = (self.llm.clone(), system.to_owned(), user);
+        let endpoint = self
+            .endpoints
+            .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
+        let llm = self.build_llm_for_endpoint(endpoint);
+        let usage = Arc::clone(&self.usage);
+        let endpoint_name = endpoint.name.clone();
+        let sys = system.to_owned();
+
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(&llm, &sys, &user_prompt))
+            rt.block_on(llm_chat_with_usage(&llm, &sys, &user))
         })
         .join()
         .unwrap();
@@ -618,8 +836,14 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: "LLM assertion call failed (server down?)".into(),
             },
-            |content| {
-                let content_lower = content.to_lowercase().trim().to_owned();
+            |lr| {
+                usage.record_llm_call(
+                    &endpoint_name,
+                    endpoint,
+                    lr.usage.prompt_tokens,
+                    lr.usage.completion_tokens,
+                );
+                let content_lower = lr.content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
                         name: "[assert] custom".into(),
@@ -630,7 +854,7 @@ impl ScenarioRunner {
                     StepResult {
                         name: "[assert] custom".into(),
                         status: StepStatus::Failed,
-                        message: content,
+                        message: lr.content,
                     }
                 }
             },
@@ -668,7 +892,201 @@ impl ScenarioRunner {
         }
     }
 
+    /// Runs an A2A agent step.
+    #[allow(clippy::literal_string_with_formatting_args)]
+    fn run_agent(
+        &self,
+        agent_name: &str,
+        task: &str,
+        definition: Option<&str>,
+        _test_endpoint: Option<&str>,
+    ) -> StepResult {
+        // If a definition is specified, look up the task template
+        let resolved_task = if let Some(def_name) = definition {
+            if let Some(def) = self.definitions.get(def_name) {
+                let tmpl = def.task_template.as_deref().unwrap_or(task);
+                tmpl.replace("{task}", task)
+            } else {
+                return StepResult {
+                    name: format!("[agent] {def_name}"),
+                    status: StepStatus::Failed,
+                    message: format!("definition '{def_name}' not found"),
+                };
+            }
+        } else {
+            task.to_owned()
+        };
+
+        self.run_agent_step(agent_name, &resolved_task, &format!("agent:{agent_name}"))
+    }
+
+    fn run_agent_step(&self, agent_name: &str, task: &str, display_name: &str) -> StepResult {
+        let Some(ep) = self.endpoints.get(agent_name) else {
+            return StepResult {
+                name: format!("[agent] {display_name}"),
+                status: StepStatus::Failed,
+                message: format!("agent endpoint '{agent_name}' not found"),
+            };
+        };
+
+        if ep.url.is_empty() {
+            return StepResult {
+                name: format!("[agent] {display_name}"),
+                status: StepStatus::Failed,
+                message: format!("agent endpoint '{agent_name}' has no URL"),
+            };
+        }
+
+        eprintln!("      → agent {agent_name}: {task}");
+
+        let url = ep.url.clone();
+        let client = A2aClient::new(&url, self.timeout);
+        let task_clone = task.to_owned();
+
+        let response = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(client.send_task(&task_clone))
+        })
+        .join()
+        .unwrap();
+
+        // Record the flat-cost call
+        self.usage.record_flat_call(agent_name, ep);
+
+        match response {
+            Ok(text) => {
+                let clean = text.trim().to_owned();
+                let lower = clean.to_lowercase();
+                if lower.starts_with("pass") {
+                    StepResult {
+                        name: format!("[agent] {display_name}"),
+                        status: StepStatus::Passed,
+                        message: format!("PASS: {clean}"),
+                    }
+                } else if lower.starts_with("fail") {
+                    StepResult {
+                        name: format!("[agent] {display_name}"),
+                        status: StepStatus::Failed,
+                        message: clean,
+                    }
+                } else {
+                    StepResult {
+                        name: format!("[agent] {display_name}"),
+                        status: StepStatus::Passed,
+                        message: format!("response: {clean}"),
+                    }
+                }
+            }
+            Err(e) => StepResult {
+                name: format!("[agent] {display_name}"),
+                status: StepStatus::Failed,
+                message: format!("agent call failed: {e}"),
+            },
+        }
+    }
+
+    /// Runs an MCP tool call step.
+    fn run_mcp(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        args: Option<&serde_json::Value>,
+    ) -> StepResult {
+        let Some(ep) = self.endpoints.get(server_name) else {
+            return StepResult {
+                name: format!("[mcp] {server_name}:{tool_name}"),
+                status: StepStatus::Failed,
+                message: format!("MCP server endpoint '{server_name}' not found"),
+            };
+        };
+
+        let cmd = ep.command.as_deref().unwrap_or("");
+        if cmd.is_empty() {
+            return StepResult {
+                name: format!("[mcp] {server_name}:{tool_name}"),
+                status: StepStatus::Failed,
+                message: format!("MCP server '{server_name}' has no command configured"),
+            };
+        }
+
+        eprintln!("      → mcp {server_name} {tool_name}");
+
+        let args_val = args.cloned().unwrap_or(serde_json::Value::Null);
+
+        let command = cmd.to_owned();
+        let args_vec = ep.args.clone();
+        let tool = tool_name.to_owned();
+
+        let response = std::thread::spawn(move || {
+            let mut mcp_client =
+                McpClient::connect_stdio(&command, &args_vec).map_err(|e| e.to_string())?;
+            mcp_client
+                .call_tool(&tool, &args_val)
+                .map_err(|e| e.to_string())
+        })
+        .join()
+        .unwrap();
+
+        // Record the flat-cost call
+        self.usage.record_flat_call(server_name, ep);
+
+        match response {
+            Ok(result) => {
+                if result.isError {
+                    StepResult {
+                        name: format!("[mcp] {server_name}:{tool_name}"),
+                        status: StepStatus::Failed,
+                        message: result.to_string(),
+                    }
+                } else {
+                    StepResult {
+                        name: format!("[mcp] {server_name}:{tool_name}"),
+                        status: StepStatus::Passed,
+                        message: result.to_string(),
+                    }
+                }
+            }
+            Err(e) => StepResult {
+                name: format!("[mcp] {server_name}:{tool_name}"),
+                status: StepStatus::Failed,
+                message: format!("MCP call failed: {e}"),
+            },
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
+
+    /// Builds an `LlmConfig` from a resolved endpoint, falling back to
+    /// the runner's default LLM config for any unset fields.
+    fn build_llm_for_endpoint(&self, endpoint: &crate::endpoints::ResolvedEndpoint) -> LlmConfig {
+        LlmConfig {
+            url: if endpoint.url.is_empty() {
+                self.llm.url.clone()
+            } else {
+                endpoint.url.clone()
+            },
+            model: endpoint
+                .model
+                .clone()
+                .unwrap_or_else(|| self.llm.model.clone()),
+            api_key: endpoint
+                .api_key
+                .clone()
+                .or_else(|| self.llm.api_key.clone()),
+            headers: if endpoint.headers.is_empty() {
+                self.llm.headers.clone()
+            } else {
+                endpoint.headers.clone()
+            },
+            timeout: self.llm.timeout,
+            temperature: self.llm.temperature,
+            thinking: self.llm.thinking,
+            model_params: self.llm.model_params.clone(),
+        }
+    }
 
     /// Resolves a CSS selector for the target element. Uses the explicit
     /// `selector` if provided, otherwise asks the LLM to find the element
@@ -677,6 +1095,8 @@ impl ScenarioRunner {
         &self,
         css_override: Option<&str>,
         target: &str,
+        step_endpoint: Option<&str>,
+        test_endpoint: Option<&str>,
         tab: &Tab,
     ) -> Result<String, String> {
         if let Some(explicit) = css_override {
@@ -707,27 +1127,45 @@ impl ScenarioRunner {
 
         eprintln!("      LLM targeting: {target}");
 
-        let (llm, sys, user_prompt) = (self.llm.clone(), system.to_owned(), user);
+        let endpoint = self
+            .endpoints
+            .resolve(step_endpoint.or(test_endpoint), TaskType::Targeting);
+        let llm = self.build_llm_for_endpoint(endpoint);
+        let usage = Arc::clone(&self.usage);
+        let endpoint_name = endpoint.name.clone();
+        let endpoint_clone = endpoint.clone();
+        let sys = system.to_owned();
+
         let selector = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat(&llm, &sys, &user_prompt))
+            rt.block_on(llm_chat_with_usage(&llm, &sys, &user))
         })
         .join()
-        .unwrap()
-        .ok_or_else(|| "LLM element targeting failed (server down?)".to_owned())?;
+        .unwrap();
 
-        let clean = selector
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim_matches('`')
-            .to_owned();
-        eprintln!("      resolved selector: {clean}");
-
-        Ok(clean)
+        match selector {
+            Some(lr) => {
+                usage.record_llm_call(
+                    &endpoint_name,
+                    &endpoint_clone,
+                    lr.usage.prompt_tokens,
+                    lr.usage.completion_tokens,
+                );
+                let clean = lr
+                    .content
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim_matches('`')
+                    .to_owned();
+                eprintln!("      resolved selector: {clean}");
+                Ok(clean)
+            }
+            None => Err("LLM element targeting failed (server down?)".to_owned()),
+        }
     }
 }
 
@@ -810,6 +1248,7 @@ fn resolve_url(url: &str, base_url: &str) -> String {
 
 // ── Support types ──────────────────────────────────────────────────────
 
+#[derive(Default)]
 struct TestRunResult {
     passed: u32,
     failed: u32,
