@@ -1,0 +1,55 @@
+# Basic browser scenario: navigate, click, type, assert — all with natural language
+# The LLM resolves element targets automatically. No CSS knowledge needed.
+# Run: llm-browser-testkit run examples/basic-navigation.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[test]]
+name = "Basic Navigation & Story Creation"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "click"
+target = "the New Story or Create Story button on the page"
+wait_after_ms = 1000
+
+[[test.steps]]
+kind = "type"
+target = "the title input field in the form"
+text = "Browser Testkit Demo Story"
+wait_after_ms = 500
+
+[[test.steps]]
+kind = "type"
+target = "the narrative textarea or description field"
+text = "As a tester I want declarative browser scenarios with natural language steps"
+wait_after_ms = 500
+
+[[test.steps]]
+kind = "click"
+target = "the submit or save or create button to submit the form"
+wait_after_ms = 1500
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is there a user story titled 'Browser Testkit Demo Story' visible on the page? Look for it in a list, table, or card."

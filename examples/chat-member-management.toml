@@ -1,0 +1,64 @@
+# Chat Room Member Management — test adding members to chat rooms
+# Run: cargo run -p llm-browser-testkit -- run crates/llm-browser-testkit/examples/chat-member-management.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/chats"
+auto_navigate = true
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[test]]
+name = "Chat Room Member Management"
+
+# Navigate and wait for SPA to render
+[[test.steps]]
+kind = "navigate"
+url = "/chats"
+wait_after_ms = 6000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "click"
+target = "+ New Room"
+wait_after_ms = 1000
+
+[[test.steps]]
+kind = "type"
+target = "room name input"
+text = "MemberMgmt-R3x9"
+wait_after_ms = 500
+
+[[test.steps]]
+kind = "click"
+target = "Create button to submit the new room form"
+wait_after_ms = 3000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "click"
+target = "+ Add Member button"
+wait_after_ms = 1500
+
+[[test.steps]]
+kind = "click"
+target = "first agent item in the list"
+wait_after_ms = 5000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "screenshot"
+path = "chat-member-added-screenshot.png"

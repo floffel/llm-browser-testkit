@@ -1,0 +1,178 @@
+# Navigation health check — verify all main routes load without errors
+# Each test auto-navigates to its start_url.
+# Run: llm-browser-testkit run examples/navigation-health.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/dashboard"
+auto_navigate = true
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+# ═══ Dashboard ═══
+
+[[test]]
+name = "Dashboard"
+
+[[test.steps]]
+kind = "navigate"
+url = "/dashboard"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Does the page look like it loaded successfully? Look for a heading, metric cards, or widget sections. Answer PASS if the page is not blank or showing an error."
+
+# ═══ Chats ═══
+
+[[test]]
+name = "Chats"
+start_url = "/chats"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is there a chat room list or a '+ New Room' button visible? Answer PASS if either is present."
+
+# ═══ Backlog ═══
+
+[[test]]
+name = "Backlog & Kanban"
+start_url = "/backlog"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the backlog stories list visible? Answer PASS even if it's empty."
+
+# ═══ Git ═══
+
+[[test]]
+name = "Git & PRs"
+start_url = "/git"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the repository selector dropdown or a create button visible? Answer PASS if git controls are present."
+
+# ═══ Team ═══
+
+[[test]]
+name = "Team"
+start_url = "/team"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the agent list, team cards, or a 'Seed Built-in Agents' button visible? Answer PASS if team-related UI is present."
+
+# ═══ Ledger ═══
+
+[[test]]
+name = "Ledger & Eval"
+start_url = "/ledger"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the ledger data table visible along with date pickers and filter controls? Answer PASS if the table structure is present."
+
+# ═══ Audit ═══
+
+[[test]]
+name = "Audit"
+start_url = "/audit"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the audit log table visible with an event kind filter? Answer PASS if the table and filter are present."
+
+# ═══ Pipelines ═══
+
+[[test]]
+name = "Pipelines"
+start_url = "/pipelines"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# ═══ Specs ═══
+
+[[test]]
+name = "Specs"
+start_url = "/specs"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# ═══ Changes ═══
+
+[[test]]
+name = "Changes"
+start_url = "/changes"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# ═══ Quality Gates ═══
+
+[[test]]
+name = "Quality Gates"
+start_url = "/quality"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# ═══ Settings ═══
+
+[[test]]
+name = "Settings — Endpoints"
+start_url = "/settings/endpoints"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the settings sub-navigation visible with links for Endpoints, Secrets, Vault, and other settings sections?"
+
+[[test]]
+name = "Settings — Model Profiles"
+start_url = "/settings/model-profiles"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"

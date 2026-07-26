@@ -1,0 +1,114 @@
+# Backlog CRUD — create a user story through the UI and verify it appears
+# Steps use natural language targets — the LLM resolves element selectors automatically.
+# Explicit selectors are provided only where DOM selection is ambiguous.
+# Run: llm-browser-testkit run examples/backlog-story-crud.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/backlog"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[definitions]]
+name = "story_list_present"
+prompt = "Is the story list visible on the page? It should show existing user stories. Answer PASS even if the list is empty — just verify the container element exists."
+
+[[definitions]]
+name = "modal_visible"
+prompt = "Is a modal dialog visible for creating a new user story? It should have fields for title, narrative, acceptance criteria, and priority."
+
+[[definitions]]
+name = "story_created"
+prompt = "Is there a user story titled 'Browser Testkit E2E Story' visible in the backlog stories list?"
+
+[[definitions]]
+name = "kanban_visible"
+prompt = "Is the Kanban board visible? It should show columns like Backlog, Ready, In Progress, Review, and Done."
+
+[[definitions]]
+name = "start_team_btn"
+prompt = "Is there a 'Start Team' button visible for the selected story?"
+
+[[test]]
+name = "Backlog Story CRUD"
+
+[[test.steps]]
+kind = "navigate"
+url = "/backlog"
+wait_after_ms = 3000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+definition = "story_list_present"
+
+[[test.steps]]
+kind = "click"
+target = "the + New Story button"
+selector = "[data-testid='backlog-new-story-btn']"
+wait_after_ms = 1000
+
+[[test.steps]]
+kind = "assert"
+definition = "modal_visible"
+
+[[test.steps]]
+kind = "type"
+target = "the story title input field in the modal"
+text = "Browser Testkit E2E Story"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "type"
+target = "the narrative textarea field in the modal"
+text = "As a tester I want declarative browser scenarios to validate the UI automatically"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "type"
+target = "the acceptance criteria textarea field in the modal"
+text = "Story appears in the backlog list after creation"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "type"
+target = "the priority number input field"
+text = "10"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "click"
+target = "the Create Story submit button at the bottom of the modal"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+definition = "story_created"
+
+[[test.steps]]
+kind = "click"
+target = "the story card titled Browser Testkit E2E Story in the backlog list"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "kanban_visible"
+
+[[test.steps]]
+kind = "assert"
+definition = "start_team_btn"
+
+[[test.steps]]
+kind = "screenshot"
+path = "backlog-kanban-screenshot.png"

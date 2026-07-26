@@ -1,0 +1,64 @@
+# Dashboard smoke test — verify the dashboard loads with key widgets and no errors
+# Run: llm-browser-testkit run examples/dashboard-smoke.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/dashboard"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[definitions]]
+name = "metrics_visible"
+prompt = "Are there metric cards visible on the page showing counts for Active Agents, Runs Today, Story Count, and Backlog Items? Look for numeric values in card-like UI elements. Answer PASS if at least two metric cards are present."
+
+[[definitions]]
+name = "tokens_cost_widget"
+prompt = "Is the Tokens & Cost widget visible? It should show Token usage and Cost in USD. Even if the values are zero, does the widget section exist?"
+
+[[definitions]]
+name = "team_activity_widget"
+prompt = "Is the Team Activity widget visible? It should show member-related information and possibly a next release ETA."
+
+[[definitions]]
+name = "release_prediction_widget"
+prompt = "Is the Release Prediction widget visible? It may show open PRs, an estimated release date, or a throughput metric."
+
+[[definitions]]
+name = "sidebar_visible"
+prompt = "Is the sidebar navigation visible on the left side of the page? It should contain links like Dashboard, Chats, Backlog & Kanban, Git & PRs, Team, Ledger & Eval, and Audit."
+
+[[test]]
+name = "Dashboard Widgets"
+
+[[test.steps]]
+kind = "navigate"
+url = "/dashboard"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+definition = "metrics_visible"
+
+[[test.steps]]
+kind = "assert"
+definition = "tokens_cost_widget"
+
+[[test.steps]]
+kind = "assert"
+definition = "team_activity_widget"
+
+[[test.steps]]
+kind = "assert"
+definition = "release_prediction_widget"
+
+[[test.steps]]
+kind = "assert"
+definition = "sidebar_visible"

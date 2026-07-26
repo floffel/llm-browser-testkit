@@ -1,0 +1,100 @@
+# Agent Chat Response Test — create room, add PM agent, send message, wait for agent response
+# Run: llm-browser-testkit run examples/agent-chat-response.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/chats"
+auto_navigate = false
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[definitions]]
+name = "room_created"
+prompt = "Is a chat room named 'AgentChat-E2E' visible in the page content? Answer PASS if the room name appears."
+
+[[definitions]]
+name = "agent_response"
+prompt = "Is there a message from an agent visible in the chat message feed? Look for messages with an agent sender label, a green left border, or an agent ID prefix like '@'. Answer PASS if any agent message is visible."
+
+[[test]]
+name = "Agent Chat Response"
+
+# Navigate to chats and wait for Angular SPA
+[[test.steps]]
+kind = "navigate"
+url = "/chats"
+wait_after_ms = 6000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# Create room
+[[test.steps]]
+kind = "click"
+target = "+ New Room button"
+wait_after_ms = 1000
+
+[[test.steps]]
+kind = "type"
+target = "room name input"
+text = "AgentChat-E2E"
+wait_after_ms = 500
+
+[[test.steps]]
+kind = "click"
+target = "Create button to submit the new room form"
+wait_after_ms = 3000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# Add the PM agent as a member
+[[test.steps]]
+kind = "click"
+target = "+ Add Member button in the members panel"
+wait_after_ms = 1500
+
+[[test.steps]]
+kind = "click"
+target = "the agent item with role PM in the agent list"
+wait_after_ms = 5000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# Type and send a message
+[[test.steps]]
+kind = "type"
+target = "the chat message composer textarea"
+text = "Hello team!"
+wait_after_ms = 500
+
+[[test.steps]]
+kind = "click"
+target = "the Send button next to the message composer"
+wait_after_ms = 5000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+# Wait for agent to respond
+[[test.steps]]
+kind = "wait"
+target = "an agent message in the chat feed (green left border or agent sender label)"
+timeout_ms = 15000
+
+[[test.steps]]
+kind = "assert"
+definition = "agent_response"
+
+[[test.steps]]
+kind = "screenshot"
+path = "agent-chat-response-screenshot.png"

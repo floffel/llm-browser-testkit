@@ -1,0 +1,221 @@
+# Full feature smoke test — comprehensive multi-page workflow with shared definitions
+# Steps use natural language targets — the LLM resolves element selectors automatically.
+# Only use `selector` as an explicit override when LLM resolution is unreliable.
+# Run: llm-browser-testkit run examples/full-feature-smoke.toml
+
+[config]
+base_url = "http://localhost:4200"
+browser_headless = true
+timeout_secs = 30
+start_url = "/dashboard"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+# ═══ Test 1: Dashboard ═══
+
+[[test]]
+name = "01 — Dashboard"
+
+[[test.steps]]
+kind = "navigate"
+url = "/dashboard"
+wait_after_ms = 4000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the dashboard rendering correctly with metric cards and at least two widget sections visible?"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Does the page have all main widgets: Tokens & Cost, Team Activity, and Release Prediction? Answer PASS if at least 2 of 3 are visible."
+
+# ═══ Test 2: Team ═══
+
+[[test]]
+name = "02 — Team"
+start_url = "/team"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the agent list, team cards, or a 'Seed Built-in Agents' button visible? Answer PASS if team-related UI is present."
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is there a 'Create Agent' button visible on the team page?"
+
+# ═══ Test 3: Backlog CRUD ═══
+
+[[test]]
+name = "03 — Backlog Story CRUD"
+start_url = "/backlog"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the backlog stories list visible with story cards?"
+
+[[test.steps]]
+kind = "click"
+target = "the + New Story button above the story list"
+wait_after_ms = 1000
+
+[[test.steps]]
+kind = "type"
+target = "the story title input field"
+text = "Full Smoke Test Story"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "type"
+target = "the narrative textarea"
+text = "As a developer I want comprehensive smoke tests to validate all features"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "type"
+target = "the acceptance criteria textarea"
+text = "Story is created and visible in the backlog"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "type"
+target = "the priority number input"
+text = "10"
+wait_after_ms = 300
+
+[[test.steps]]
+kind = "click"
+target = "the Create Story submit button at the bottom of the modal"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is a user story titled 'Full Smoke Test Story' visible in the backlog stories list after creation?"
+
+[[test.steps]]
+kind = "click"
+target = "the story card titled Full Smoke Test Story in the backlog list"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the Kanban board visible with column headers like Backlog, Ready, In Progress, Review, Done?"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is there a 'Start Team' button visible for the selected story?"
+
+# ═══ Test 4: Chats ═══
+
+[[test]]
+name = "04 — Chats"
+start_url = "/chats"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the chat room list or a '+ New Room' button visible? Answer PASS if either is present."
+
+# ═══ Test 5: Git ═══
+
+[[test]]
+name = "05 — Git & PRs"
+start_url = "/git"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the repository selector or a create repo button visible? Answer PASS if git management controls are present."
+
+# ═══ Test 6: Ledger ═══
+
+[[test]]
+name = "06 — Ledger"
+start_url = "/ledger"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the ledger data table visible with date range pickers, filter dropdowns, and summary metric cards? Answer PASS if the table and filter controls are present."
+
+# ═══ Test 7: Audit ═══
+
+[[test]]
+name = "07 — Audit"
+start_url = "/audit"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the audit log table visible with event kind filter dropdown? Answer PASS if the table and filter are present."
+
+# ═══ Test 8: Model Profiles ═══
+
+[[test]]
+name = "08 — Model Profiles"
+start_url = "/settings/model-profiles"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the model profiles list visible with profile rows and source badges like 'BuiltIn' or 'UserOverride'? Answer PASS if profile entries are present."
+
+# ═══ Test 9: Settings Endpoints ═══
+
+[[test]]
+name = "09 — Settings Endpoints"
+start_url = "/settings/endpoints"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "Is the settings sub-navigation visible and does this page show endpoint configuration? Answer PASS if the content is present."
+
+# ═══ Test 10: Final Dashboard ═══
+
+[[test]]
+name = "10 — Final Dashboard"
+start_url = "/dashboard"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+prompt = "After navigating through all pages, is the dashboard still rendering correctly? Are the metric cards and widgets visible? Answer PASS if the page looks intact."

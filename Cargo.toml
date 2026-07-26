@@ -1,0 +1,39 @@
+[package]
+name = "llm-browser-testkit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/floffel/llm-browser-testkit"
+description = "LLM-driven browser test framework — define browser test scenarios in TOML with natural language steps and LLM-powered assertions"
+keywords = ["llm", "testing", "browser", "e2e", "integration-testing"]
+categories = ["development-tools::testing"]
+readme = "README.md"
+
+[[bin]]
+name = "llm-browser-testkit"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+nursery = { level = "warn", priority = -1 }
+
+[dependencies]
+reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+headless_chrome = "1"

@@ -1,0 +1,37 @@
+# Standalone smoke test — tests a publicly accessible site with no dependencies
+# Run: llm-browser-testkit run examples/smoke.toml
+
+[config]
+base_url = "https://example.com"
+browser_headless = true
+timeout_secs = 30
+start_url = "/"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[definitions]]
+name = "domain_header_visible"
+preset = "text_visible"
+assert_text = "Example Domain"
+
+[[test]]
+name = "example.com smoke test"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+definition = "domain_header_visible"
+
+[[test.steps]]
+kind = "screenshot"
+path = "smoke-result.png"
