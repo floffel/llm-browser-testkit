@@ -190,11 +190,7 @@ impl ScenarioRunner {
             if mcp_cfg.enabled {
                 let port = mcp_cfg.port;
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
-                    let _ = rt.block_on(crate::mcp_server::start_mcp_server(port));
+                    let _ = crate::mcp_server::start_mcp_server(port);
                 });
             }
         }
