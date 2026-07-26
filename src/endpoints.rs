@@ -191,3 +191,94 @@ impl EndpointRegistry {
         self.endpoints.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_task_type_as_str() {
+        assert_eq!(TaskType::Targeting.as_str(), "targeting");
+        assert_eq!(TaskType::Assertion.as_str(), "assertion");
+    }
+
+    #[test]
+    fn test_registry_empty_config() {
+        let endpoints = HashMap::new();
+        let registry = EndpointRegistry::from_config(&endpoints);
+        assert_eq!(registry.len(), 1);
+        let ep = registry.get("default").unwrap();
+        assert_eq!(ep.endpoint_type, EndpointType::Llm);
+    }
+
+    #[test]
+    fn test_registry_resolve_by_name() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "vision".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("https://api.openai.com".into()),
+                model: Some("gpt-4o".into()),
+                ..Default::default()
+            },
+        );
+
+        let registry = EndpointRegistry::from_config(&endpoints);
+        let ep = registry.get("vision");
+        assert!(ep.is_some());
+        assert_eq!(ep.unwrap().model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_resolve_for_task_with_default() {
+        let mut endpoints = HashMap::new();
+        let ec = EndpointConfig {
+            endpoint_type: EndpointType::Llm,
+            url: Some("http://localhost:8080".into()),
+            model: Some("deepseek".into()),
+            default_for: vec!["targeting".to_owned()],
+            ..Default::default()
+        };
+        endpoints.insert("main".to_owned(), ec);
+
+        let registry = EndpointRegistry::from_config(&endpoints);
+        let ep = registry.resolve_for_task(TaskType::Targeting);
+        assert_eq!(ep.name, "main");
+    }
+
+    #[test]
+    fn test_resolve_explicit_overrides_task() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "default".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://default".into()),
+                default_for: vec!["targeting".to_owned()],
+                ..Default::default()
+            },
+        );
+        endpoints.insert(
+            "fast".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://fast".into()),
+                ..Default::default()
+            },
+        );
+
+        let registry = EndpointRegistry::from_config(&endpoints);
+        let ep = registry.resolve(Some("fast"), TaskType::Targeting);
+        assert_eq!(ep.name, "fast");
+    }
+
+    #[test]
+    fn test_default_llm_has_env_values() {
+        let ep = ResolvedEndpoint::default_llm();
+        assert_eq!(ep.endpoint_type, EndpointType::Llm);
+        assert!(ep.model.is_some());
+        assert!(!ep.url.is_empty());
+    }
+}

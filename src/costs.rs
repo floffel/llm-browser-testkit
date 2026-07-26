@@ -238,3 +238,115 @@ pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
         total_tokens: usage["total_tokens"].as_u64().unwrap_or(0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::costs::{calculate_llm_cost, UsageTracker};
+    use crate::endpoints::ResolvedEndpoint;
+    use crate::scenario::EndpointType;
+
+    fn make_endpoint(
+        name: &str,
+        input_price: f64,
+        output_price: f64,
+        per_call: f64,
+    ) -> ResolvedEndpoint {
+        ResolvedEndpoint {
+            name: name.to_owned(),
+            endpoint_type: EndpointType::Llm,
+            url: String::new(),
+            model: None,
+            api_key: None,
+            headers: std::collections::HashMap::new(),
+            command: None,
+            args: vec![],
+            input_price_per_1m: input_price,
+            output_price_per_1m: output_price,
+            per_call_price: per_call,
+        }
+    }
+
+    #[test]
+    fn test_calculate_llm_cost() {
+        let ep = make_endpoint("test", 0.15, 0.60, 0.0);
+        // 1M input tokens = $0.15, 500K output = $0.30
+        let cost = calculate_llm_cost(&ep, 1_000_000, 500_000);
+        assert!((cost - 0.45).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_calculate_zero_cost() {
+        let ep = make_endpoint("free", 0.0, 0.0, 0.0);
+        let cost = calculate_llm_cost(&ep, 1_000_000, 1_000_000);
+        assert!((cost - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_usage_tracker_record_llm() {
+        let tracker = UsageTracker::new();
+        let ep = make_endpoint("gpt4", 2.50, 10.0, 0.0);
+        tracker.record_llm_call("gpt4", &ep, 1000, 500);
+
+        let snap = tracker.current_test_snapshot();
+        assert_eq!(snap.total_calls, 1);
+        assert_eq!(snap.total_tokens, 1500);
+        assert!(
+            snap.total_cost > 0.0,
+            "expected cost > 0, got {}",
+            snap.total_cost
+        );
+
+        let ep_usage = snap.endpoints.get("gpt4").unwrap();
+        assert_eq!(ep_usage.calls, 1);
+        assert_eq!(ep_usage.input_tokens, 1000);
+        assert_eq!(ep_usage.output_tokens, 500);
+    }
+
+    #[test]
+    fn test_usage_tracker_record_flat() {
+        let tracker = UsageTracker::new();
+        let ep = make_endpoint("agent", 0.0, 0.0, 0.01);
+        tracker.record_flat_call("agent", &ep);
+        tracker.record_flat_call("agent", &ep);
+
+        let snap = tracker.current_test_snapshot();
+        assert_eq!(snap.total_calls, 2);
+        assert!((snap.total_cost - 0.02).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_usage_tracker_multiple_endpoints() {
+        let tracker = UsageTracker::new();
+        let fast = make_endpoint("fast", 0.15, 0.60, 0.0);
+        let slow = make_endpoint("slow", 2.50, 10.0, 0.0);
+
+        tracker.record_llm_call("fast", &fast, 100, 50);
+        tracker.record_llm_call("slow", &slow, 200, 100);
+
+        let snap = tracker.current_test_snapshot();
+        assert_eq!(snap.total_calls, 2);
+        assert_eq!(snap.endpoints.len(), 2);
+    }
+
+    #[test]
+    fn test_usage_tracker_reset_and_commit() {
+        let tracker = UsageTracker::new();
+        let ep = make_endpoint("test", 0.15, 0.60, 0.0);
+
+        tracker.record_llm_call("test", &ep, 100, 50);
+        tracker.commit_test("test1");
+        tracker.reset_per_test();
+
+        tracker.record_llm_call("test", &ep, 200, 100);
+        tracker.commit_test("test2");
+
+        let global = tracker.global_snapshot();
+        assert_eq!(global.total_calls, 2);
+        assert_eq!(global.total_tokens, 450);
+
+        let per_test = tracker.per_test_snapshots();
+        assert_eq!(per_test.len(), 2);
+        assert_eq!(per_test[0].0, "test1");
+        assert_eq!(per_test[1].0, "test2");
+    }
+}

@@ -88,3 +88,50 @@ fn extract_a2a_text(value: &Value) -> Option<String> {
         .and_then(|parts| parts.iter().find_map(|p| p["text"].as_str()))
         .map(String::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_a2a_text() {
+        let json = serde_json::json!({
+            "result": {
+                "messages": [
+                    {
+                        "parts": [
+                            {"type": "text", "text": "PASS: everything looks good"}
+                        ]
+                    }
+                ]
+            }
+        });
+        let text = extract_a2a_text(&json);
+        assert_eq!(text.as_deref(), Some("PASS: everything looks good"));
+    }
+
+    #[test]
+    fn test_extract_a2a_text_empty() {
+        let json = serde_json::json!({});
+        let text = extract_a2a_text(&json);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_extract_a2a_text_multiple_messages() {
+        let json = serde_json::json!({
+            "result": {
+                "messages": [
+                    {
+                        "parts": [{"type": "text", "text": "Thinking..."}]
+                    },
+                    {
+                        "parts": [{"type": "text", "text": "Final answer"}]
+                    }
+                ]
+            }
+        });
+        let text = extract_a2a_text(&json);
+        assert_eq!(text.as_deref(), Some("Final answer"));
+    }
+}

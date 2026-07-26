@@ -135,7 +135,7 @@ impl BudgetTracker {
     }
 
     fn check_budget(name: &str, budget: &ResolvedBudget, usage: &UsageSnapshot) -> BudgetStatus {
-        Self::check_limits(budget, name, usage, usage.total_cost, usage.total_tokens, 0)
+        Self::check_limits(budget, name, usage, 0.0, 0, 0)
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -211,5 +211,123 @@ impl BudgetTracker {
             return per_test;
         }
         global
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::budgets::{BudgetStatus, BudgetTracker};
+    use crate::costs::UsageSnapshot;
+    use crate::scenario::{BudgetDef, BudgetEnforcement, BudgetsConfig};
+
+    #[test]
+    fn test_no_budgets_always_ok() {
+        let config = BudgetsConfig::default();
+        let tracker = BudgetTracker::from_config(&config);
+        let usage = UsageSnapshot::default();
+        assert_eq!(tracker.check_global(&usage), BudgetStatus::Ok);
+        assert_eq!(
+            tracker.check_per_test("test", &usage, None),
+            BudgetStatus::Ok
+        );
+    }
+
+    #[test]
+    fn test_global_cost_hard_limit() {
+        let config = BudgetsConfig {
+            global: Some(BudgetDef {
+                max_cost: Some(5.0),
+                max_tokens: None,
+                max_calls: None,
+                enforcement: Some(BudgetEnforcement::Hard),
+            }),
+            per_test_default: None,
+        };
+        let tracker = BudgetTracker::from_config(&config);
+        let under = UsageSnapshot {
+            total_cost: 3.0,
+            ..UsageSnapshot::default()
+        };
+        assert_eq!(tracker.check_global(&under), BudgetStatus::Ok);
+        let over = UsageSnapshot {
+            total_cost: 6.0,
+            ..UsageSnapshot::default()
+        };
+        assert!(matches!(
+            tracker.check_global(&over),
+            BudgetStatus::HardExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_global_cost_soft_limit() {
+        let config = BudgetsConfig {
+            global: Some(BudgetDef {
+                max_cost: Some(5.0),
+                max_tokens: None,
+                max_calls: None,
+                enforcement: Some(BudgetEnforcement::Soft),
+            }),
+            per_test_default: None,
+        };
+        let tracker = BudgetTracker::from_config(&config);
+        let over = UsageSnapshot {
+            total_cost: 6.0,
+            ..UsageSnapshot::default()
+        };
+        assert!(matches!(
+            tracker.check_global(&over),
+            BudgetStatus::SoftExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_per_test_token_limit() {
+        let config = BudgetsConfig {
+            global: None,
+            per_test_default: Some(BudgetDef {
+                max_cost: None,
+                max_tokens: Some(10000),
+                max_calls: None,
+                enforcement: Some(BudgetEnforcement::Hard),
+            }),
+        };
+        let tracker = BudgetTracker::from_config(&config);
+        let over = UsageSnapshot {
+            total_tokens: 15000,
+            ..UsageSnapshot::default()
+        };
+        assert!(matches!(
+            tracker.check_per_test("test", &over, None),
+            BudgetStatus::HardExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_check_all_global_priority() {
+        let config = BudgetsConfig {
+            global: Some(BudgetDef {
+                max_cost: Some(5.0),
+                max_tokens: None,
+                max_calls: None,
+                enforcement: Some(BudgetEnforcement::Hard),
+            }),
+            per_test_default: Some(BudgetDef {
+                max_cost: Some(10.0),
+                max_tokens: None,
+                max_calls: None,
+                enforcement: Some(BudgetEnforcement::Hard),
+            }),
+        };
+        let tracker = BudgetTracker::from_config(&config);
+        let global = UsageSnapshot {
+            total_cost: 6.0,
+            ..UsageSnapshot::default()
+        };
+        let test = UsageSnapshot::default();
+        assert!(matches!(
+            tracker.check_all("test", &test, &global, None),
+            BudgetStatus::HardExceeded { .. }
+        ));
     }
 }

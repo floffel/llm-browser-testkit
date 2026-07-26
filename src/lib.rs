@@ -262,3 +262,91 @@ pub fn truncate(s: &str, max_len: usize) -> String {
         format!("{}...<truncated>", &s[..max_len])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::costs::extract_usage;
+    use crate::truncate;
+    use crate::{parse_headers_env, LlmConfig};
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        let result = truncate("hello world", 5);
+        assert!(result.contains("<truncated>"));
+        assert!(result.starts_with("hello"));
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        assert_eq!(truncate("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn test_truncate_empty() {
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn test_parse_headers_env_empty() {
+        std::env::remove_var("HARNESS_LLM_HEADERS");
+        let h = parse_headers_env();
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn test_parse_headers_env_valid() {
+        std::env::set_var("HARNESS_LLM_HEADERS", r#"{"X-Org":"acme","X-Version":"1"}"#);
+        let h = parse_headers_env();
+        assert_eq!(h.get("X-Org").map(String::as_str), Some("acme"));
+        assert_eq!(h.get("X-Version").map(String::as_str), Some("1"));
+        std::env::remove_var("HARNESS_LLM_HEADERS");
+    }
+
+    #[test]
+    fn test_parse_headers_env_invalid_json() {
+        std::env::set_var("HARNESS_LLM_HEADERS", "not-json");
+        let h = parse_headers_env();
+        assert!(h.is_empty());
+        std::env::remove_var("HARNESS_LLM_HEADERS");
+    }
+
+    #[test]
+    fn test_llm_config_from_env_defaults() {
+        #[allow(clippy::float_cmp)]
+        {
+            let config = LlmConfig::from_env();
+            assert_eq!(config.temperature, 0.0);
+            assert!(config.thinking.is_none());
+            assert!(config.model_params.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_extract_usage_full() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 200,
+                "total_tokens": 300
+            }
+        });
+        let usage = extract_usage(&json);
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 200);
+        assert_eq!(usage.total_tokens, 300);
+    }
+
+    #[test]
+    fn test_extract_usage_empty() {
+        let json = serde_json::json!({});
+        let usage = extract_usage(&json);
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+    }
+}

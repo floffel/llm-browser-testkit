@@ -131,7 +131,7 @@ pub struct ScenarioConfig {
 }
 
 /// A named endpoint definition with pricing.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct EndpointConfig {
     /// Endpoint type: `llm`, `mcp`, or `a2a`.
     #[serde(rename = "type")]
@@ -164,10 +164,11 @@ pub struct EndpointConfig {
 }
 
 /// Type discriminator for endpoint configuration.
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
     /// OpenAI-compatible LLM API.
+    #[default]
     Llm,
     /// Model Context Protocol server.
     Mcp,

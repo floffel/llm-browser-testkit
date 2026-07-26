@@ -308,3 +308,73 @@ pub struct McpResource {
     #[serde(default)]
     pub mimeType: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mcp_tool_result_display_text() {
+        let result = McpToolResult {
+            content: vec![McpContent::Text {
+                text: "hello world".into(),
+            }],
+            isError: false,
+        };
+        assert_eq!(result.to_string(), "hello world");
+    }
+
+    #[test]
+    fn test_mcp_tool_result_display_multiple() {
+        let result = McpToolResult {
+            content: vec![
+                McpContent::Text {
+                    text: "line1".into(),
+                },
+                McpContent::Text {
+                    text: "line2".into(),
+                },
+            ],
+            isError: false,
+        };
+        assert_eq!(result.to_string(), "line1\nline2");
+    }
+
+    #[test]
+    fn test_mcp_tool_result_display_resource() {
+        let result = McpToolResult {
+            content: vec![McpContent::Resource {
+                resource: McpResource {
+                    uri: "file:///test".into(),
+                    mimeType: "text/plain".into(),
+                },
+            }],
+            isError: false,
+        };
+        assert_eq!(result.to_string(), "[resource: file:///test]");
+    }
+
+    #[test]
+    fn test_mcp_tool_result_display_image() {
+        let result = McpToolResult {
+            content: vec![McpContent::Image {
+                data: "base64data".into(),
+                mimeType: "image/png".into(),
+            }],
+            isError: false,
+        };
+        assert_eq!(result.to_string(), "[image: image/png, 10 bytes]");
+    }
+
+    #[test]
+    fn test_mcp_tool_deserialize() {
+        let json = serde_json::json!({
+            "name": "query",
+            "description": "Run a SQL query",
+            "inputSchema": {"type": "object"}
+        });
+        let tool: McpTool = serde_json::from_value(json).unwrap();
+        assert_eq!(tool.name, "query");
+        assert_eq!(tool.description, "Run a SQL query");
+    }
+}
