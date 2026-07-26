@@ -44,7 +44,11 @@ pub struct LlmConfig {
     /// Sampling temperature (0.0–1.0).
     pub temperature: f64,
     /// Enable extended thinking / reasoning tokens.
-    pub thinking: bool,
+    /// `None` = don't send any thinking key (provider default).
+    pub thinking: Option<bool>,
+    /// Provider-specific parameters merged into the request body
+    /// (e.g. `effort = "high"` for Anthropic).
+    pub model_params: HashMap<String, Value>,
 }
 
 impl LlmConfig {
@@ -59,7 +63,8 @@ impl LlmConfig {
             headers: parse_headers_env(),
             timeout: Duration::from_secs(60),
             temperature: 0.0,
-            thinking: false,
+            thinking: None,
+            model_params: HashMap::new(),
         }
     }
 }
@@ -123,11 +128,7 @@ pub fn http_client(timeout: Duration) -> reqwest::Client {
 /// Sends a chat completion request to the LLM.
 ///
 /// Returns `Some(content)` on success, `None` on any error.
-pub async fn llm_chat(
-    llm: &LlmConfig,
-    system: &str,
-    user: &str,
-) -> Option<String> {
+pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<String> {
     let client = http_client(llm.timeout);
     let mut payload = serde_json::json!({
         "model": llm.model,
@@ -138,10 +139,23 @@ pub async fn llm_chat(
         "max_tokens": 4096,
         "temperature": llm.temperature
     });
-    if llm.thinking {
-        payload["thinking"] = serde_json::json!({"type": "enabled"});
-    } else {
-        payload["thinking"] = serde_json::json!({"type": "disabled"});
+    if let Some(think) = llm.thinking {
+        if think {
+            payload["thinking"] = serde_json::json!({"type": "enabled"});
+        } else {
+            payload["thinking"] = serde_json::json!({"type": "disabled"});
+        }
+    }
+    // Merge provider-specific parameters into the request body.
+    //
+    // This supports non-OpenAI params like Anthropic's `effort` or
+    // provider-specific reasoning controls.
+    if !llm.model_params.is_empty() {
+        if let Value::Object(ref mut map) = payload {
+            for (key, val) in &llm.model_params {
+                map.insert(key.clone(), val.clone());
+            }
+        }
     }
     let mut req = client
         .post(format!("{}/v1/chat/completions", llm.url))

@@ -1,0 +1,36 @@
+# Anthropic / custom provider example — thinking disabled, model_params for provider-specific options
+# Run: llm-browser-testkit run examples/custom-provider.toml \
+#        --llm-url https://api.anthropic.com \
+#        --llm-model claude-sonnet-4-20250514 \
+#        --llm-api-key $ANTHROPIC_API_KEY
+
+[config]
+base_url = "https://example.com"
+timeout_secs = 30
+start_url = "/"
+
+# For Anthropic: don't send `thinking` at all (leave unset / set to null in TOML).
+# Use `model_params` to pass provider-specific fields like `effort`.
+# For OpenAI with thinking: set `thinking = true` or `thinking = false`.
+[config.model_params]
+effort = "high"
+
+[[definitions]]
+name = "no_errors"
+preset = "no_error_on_page"
+
+[[test]]
+name = "Smoke test"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "no_errors"
+
+[[test.steps]]
+kind = "screenshot"
+path = "anthropic-smoke.png"

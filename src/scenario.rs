@@ -49,6 +49,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 /// Top-level scenario file, deserialized from TOML.
 #[derive(Debug, Deserialize)]
@@ -98,9 +99,15 @@ pub struct ScenarioConfig {
     /// LLM temperature (0.0–1.0). Lower = more deterministic.
     #[serde(default = "default_temperature")]
     pub temperature: f64,
-    /// Enable thinking/reasoning mode (for models that support it).
-    #[serde(default = "default_thinking")]
-    pub thinking: bool,
+    /// Enable thinking/reasoning tokens. `None` means the provider default
+    /// is used (no `thinking` key is sent). Set to `true`/`false` to
+    /// explicitly enable or disable.
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    /// Provider-specific model parameters merged into the chat completion
+    /// request body (e.g. `effort = "high"` for Anthropic).
+    #[serde(default, deserialize_with = "deserialize_model_params")]
+    pub model_params: HashMap<String, Value>,
 }
 
 fn deserialize_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
@@ -128,11 +135,30 @@ const fn default_temperature() -> f64 {
     0.0
 }
 
-const fn default_thinking() -> bool {
-    false
+fn deserialize_model_params<'de, D>(deserializer: D) -> Result<HashMap<String, Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Map(HashMap<String, Value>),
+        Table(HashMap<String, Value>),
+    }
+    let raw: Option<Raw> = Option::deserialize(deserializer)?;
+    Ok(match raw {
+        Some(Raw::Map(m) | Raw::Table(m)) => m,
+        None => HashMap::new(),
+    })
 }
 
 /// Reusable assertion definition referenced by name from `assert` steps.
+///
+/// Definitions can either reference a built-in preset via `preset`, supply a
+/// custom LLM `prompt`, or define a **custom preset** by providing both
+/// `system` and `user_template`. Custom presets support the same template
+/// variables as built-in presets: `{url}`, `{title}`, `{content}`,
+/// `{expected_text}`, `{description}`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct AssertDefinition {
     /// Unique name used to reference this definition from steps.
@@ -143,7 +169,14 @@ pub struct AssertDefinition {
     /// Custom LLM prompt for assertion evaluation.
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Text that the `text_visible` preset checks for.
+    /// System prompt for a custom preset.
+    #[serde(default)]
+    pub system: Option<String>,
+    /// User template (with `{placeholders}`) for a custom preset.
+    #[serde(default)]
+    pub user_template: Option<String>,
+    /// Text that the `text_visible` preset checks for, or the
+    /// `{expected_text}` placeholder value for custom presets.
     #[serde(default)]
     pub assert_text: Option<String>,
 }

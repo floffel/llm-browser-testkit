@@ -60,14 +60,20 @@ macro_rules! browser_test {
             let toml_content = match ::std::fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(e) => {
-                    ::std::eprintln!("⏭️  skipping {}: cannot read TOML ({e})", ::std::stringify!($name));
+                    ::std::eprintln!(
+                        "⏭️  skipping {}: cannot read TOML ({e})",
+                        ::std::stringify!($name)
+                    );
                     return;
                 }
             };
             let scenario: $crate::scenario::Scenario = match ::toml::from_str(&toml_content) {
                 Ok(s) => s,
                 Err(e) => {
-                    ::std::eprintln!("⏭️  skipping {}: invalid TOML ({e})", ::std::stringify!($name));
+                    ::std::eprintln!(
+                        "⏭️  skipping {}: invalid TOML ({e})",
+                        ::std::stringify!($name)
+                    );
                     return;
                 }
             };
@@ -80,13 +86,10 @@ macro_rules! browser_test {
                 Ok(report) => {
                     if report.tests_passed == 0
                         && report.failed > 0
-                        && report
-                            .details
-                            .iter()
-                            .any(|d| {
-                                d.message.contains("LLM assertion call failed")
-                                    || d.message.contains("LLM element targeting failed")
-                            })
+                        && report.details.iter().any(|d| {
+                            d.message.contains("LLM assertion call failed")
+                                || d.message.contains("LLM element targeting failed")
+                        })
                     {
                         ::std::eprintln!(
                             "⏭️  skipping {}: LLM endpoint unavailable",
@@ -95,13 +98,19 @@ macro_rules! browser_test {
                         return;
                     }
                     assert_eq!(
-                        report.tests_failed, 0,
+                        report.tests_failed,
+                        0,
                         "{}: {} test(s) failed, {} passed",
                         ::std::stringify!($name),
                         report.tests_failed,
                         report.tests_passed,
                     );
-                    assert_ne!(report.tests_passed, 0, "{}: no tests ran", ::std::stringify!($name));
+                    assert_ne!(
+                        report.tests_passed,
+                        0,
+                        "{}: no tests ran",
+                        ::std::stringify!($name)
+                    );
                 }
                 Err(e) => {
                     if e.to_string().contains("failed to launch browser") {
@@ -129,7 +138,10 @@ macro_rules! browser_test_inline {
             let scenario: $crate::scenario::Scenario = match ::toml::from_str($toml) {
                 Ok(s) => s,
                 Err(e) => {
-                    ::std::eprintln!("⏭️  skipping {}: invalid TOML ({e})", ::std::stringify!($name));
+                    ::std::eprintln!(
+                        "⏭️  skipping {}: invalid TOML ({e})",
+                        ::std::stringify!($name)
+                    );
                     return;
                 }
             };
@@ -142,13 +154,10 @@ macro_rules! browser_test_inline {
                 Ok(report) => {
                     if report.tests_passed == 0
                         && report.failed > 0
-                        && report
-                            .details
-                            .iter()
-                            .any(|d| {
-                                d.message.contains("LLM assertion call failed")
-                                    || d.message.contains("LLM element targeting failed")
-                            })
+                        && report.details.iter().any(|d| {
+                            d.message.contains("LLM assertion call failed")
+                                || d.message.contains("LLM element targeting failed")
+                        })
                     {
                         ::std::eprintln!(
                             "⏭️  skipping {}: LLM endpoint unavailable",
@@ -157,13 +166,19 @@ macro_rules! browser_test_inline {
                         return;
                     }
                     assert_eq!(
-                        report.tests_failed, 0,
+                        report.tests_failed,
+                        0,
                         "{}: {} test(s) failed, {} passed",
                         ::std::stringify!($name),
                         report.tests_failed,
                         report.tests_passed,
                     );
-                    assert_ne!(report.tests_passed, 0, "{}: no tests ran", ::std::stringify!($name));
+                    assert_ne!(
+                        report.tests_passed,
+                        0,
+                        "{}: no tests ran",
+                        ::std::stringify!($name)
+                    );
                 }
                 Err(e) => {
                     if e.to_string().contains("failed to launch browser") {

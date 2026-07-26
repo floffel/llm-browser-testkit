@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +51,11 @@ enum Command {
         #[arg(long = "llm-header", value_parser = parse_header)]
         llm_headers: Vec<(String, String)>,
 
+        /// Model parameter `key=value` merged into the chat completion body
+        /// (repeatable, e.g. `--model-param effort=high`).
+        #[arg(long = "model-param", value_parser = parse_model_param)]
+        model_params: Vec<(String, Value)>,
+
         /// Run browser in headless mode (default: true).
         #[arg(long, default_value = "true")]
         headless: bool,
@@ -80,6 +86,20 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
     Ok((k.trim().to_owned(), v.trim().to_owned()))
 }
 
+/// Parses "key=value" strings from `--model-param`.
+/// JSON values (quoted strings, numbers, booleans) are parsed as-is;
+/// bare words become JSON strings.
+fn parse_model_param(s: &str) -> Result<(String, Value), String> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("model param must be 'key=value', got '{s}'"))?;
+    let key = k.trim().to_owned();
+    let val_str = v.trim();
+    let val = serde_json::from_str::<Value>(val_str)
+        .unwrap_or_else(|_| Value::String(val_str.to_owned()));
+    Ok((key, val))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -92,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
             llm_model,
             llm_api_key,
             llm_headers,
+            model_params,
             headless,
             timeout,
             viewport_width,
@@ -116,6 +137,13 @@ async fn main() -> anyhow::Result<()> {
                     headers.insert(k, v);
                 }
                 config.llm_headers = headers;
+            }
+            if !model_params.is_empty() {
+                let mut params = config.model_params;
+                for (k, v) in model_params {
+                    params.insert(k, v);
+                }
+                config.model_params = params;
             }
             config.browser_headless = Some(headless);
             config.timeout_secs = Some(timeout.max(config.timeout_secs.unwrap_or(60)));

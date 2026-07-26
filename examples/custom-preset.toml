@@ -1,0 +1,35 @@
+# Custom preset example — define your own assertion preset with system + user_template
+# Run: llm-browser-testkit run examples/custom-preset.toml
+
+[config]
+base_url = "https://example.com"
+timeout_secs = 30
+start_url = "/"
+
+# Custom assertion preset — same power as built-in presets
+[[definitions]]
+name = "has_heading"
+system = "You are a precise QA tester."
+user_template = "Check the page content for a heading or title. The page should have a visible heading.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nRespond with exactly \"PASS\" if a heading is present, or \"FAIL: <reason>\" if not."
+
+[[definitions]]
+name = "contains_example_domain"
+system = "You check web page content for specific text."
+user_template = "Does the page mention the text \"{expected_text}\" anywhere?\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nRespond with exactly \"PASS\" if the text is found, or \"FAIL: <reason>\" if not."
+assert_text = "example domain"
+
+[[test]]
+name = "Custom preset demo"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+wait_after_ms = 2000
+
+[[test.steps]]
+kind = "assert"
+definition = "has_heading"
+
+[[test.steps]]
+kind = "assert"
+definition = "contains_example_domain"

@@ -101,9 +101,10 @@ impl ScenarioRunner {
                 .llm_model
                 .clone()
                 .unwrap_or_else(crate::llm_model),
-            api_key: scenario_config.llm_api_key.clone().or_else(|| {
-                std::env::var("HARNESS_LLM_API_KEY").ok()
-            }),
+            api_key: scenario_config
+                .llm_api_key
+                .clone()
+                .or_else(|| std::env::var("HARNESS_LLM_API_KEY").ok()),
             headers: if scenario_config.llm_headers.is_empty() {
                 crate::parse_headers_env()
             } else {
@@ -112,6 +113,7 @@ impl ScenarioRunner {
             timeout: Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60)),
             temperature: scenario_config.temperature,
             thinking: scenario_config.thinking,
+            model_params: scenario_config.model_params.clone(),
         };
         let timeout = Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60));
         let viewport_width = scenario_config.viewport_width.unwrap_or(1280);
@@ -448,18 +450,82 @@ impl ScenarioRunner {
     }
 
     fn run_assert_def(&self, def: &AssertDefinition, page_content: &PageContent) -> StepResult {
+        // Custom preset: system + user_template provided in the definition
+        if let (Some(system), Some(template)) = (&def.system, &def.user_template) {
+            return self.run_custom_preset(
+                &def.name,
+                system,
+                template,
+                def.assert_text.as_deref(),
+                page_content,
+            );
+        }
+
         def.preset.as_ref().map_or_else(
             || {
                 def.prompt.as_ref().map_or_else(
                     || StepResult {
                         name: format!("[assert] {}", def.name),
                         status: StepStatus::Failed,
-                        message: "definition has no preset or prompt".into(),
+                        message: "definition has no preset, prompt, or system+user_template".into(),
                     },
                     |prompt| self.run_custom(prompt, page_content),
                 )
             },
             |preset_name| self.run_preset(preset_name, def.assert_text.as_deref(), page_content),
+        )
+    }
+
+    fn run_custom_preset(
+        &self,
+        name: &str,
+        system: &str,
+        template: &str,
+        assert_text: Option<&str>,
+        page_content: &PageContent,
+    ) -> StepResult {
+        let user_prompt = template
+            .replace("{url}", &page_content.url)
+            .replace("{title}", &page_content.title)
+            .replace("{content}", &page_content.body_text)
+            .replace("{expected_text}", assert_text.unwrap_or(""))
+            .replace("{description}", "");
+
+        eprintln!("      assert: {name} (custom preset)");
+
+        let (llm, sys, prompt) = (self.llm.clone(), system.to_owned(), user_prompt);
+        let response = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(llm_chat(&llm, &sys, &prompt))
+        })
+        .join()
+        .unwrap();
+
+        response.map_or_else(
+            || StepResult {
+                name: format!("[assert] {name}"),
+                status: StepStatus::Failed,
+                message: "LLM assertion call failed (server down?)".into(),
+            },
+            |content| {
+                let content_lower = content.to_lowercase().trim().to_owned();
+                if content_lower.starts_with("pass") {
+                    StepResult {
+                        name: format!("[assert] {name}"),
+                        status: StepStatus::Passed,
+                        message: "PASS".into(),
+                    }
+                } else {
+                    StepResult {
+                        name: format!("[assert] {name}"),
+                        status: StepStatus::Failed,
+                        message: content,
+                    }
+                }
+            },
         )
     }
 
@@ -487,11 +553,7 @@ impl ScenarioRunner {
 
         eprintln!("      assert: {preset_name}");
 
-        let (llm, sys, prompt) = (
-            self.llm.clone(),
-            preset.system.to_owned(),
-            user_prompt,
-        );
+        let (llm, sys, prompt) = (self.llm.clone(), preset.system.to_owned(), user_prompt);
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -539,11 +601,7 @@ impl ScenarioRunner {
 
         eprintln!("      custom assert");
 
-        let (llm, sys, user_prompt) = (
-            self.llm.clone(),
-            system.to_owned(),
-            user,
-        );
+        let (llm, sys, user_prompt) = (self.llm.clone(), system.to_owned(), user);
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -649,11 +707,7 @@ impl ScenarioRunner {
 
         eprintln!("      LLM targeting: {target}");
 
-        let (llm, sys, user_prompt) = (
-            self.llm.clone(),
-            system.to_owned(),
-            user,
-        );
+        let (llm, sys, user_prompt) = (self.llm.clone(), system.to_owned(), user);
         let selector = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
