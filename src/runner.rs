@@ -716,10 +716,10 @@ impl ScenarioRunner {
         .unwrap();
 
         response.map_or_else(
-            || StepResult {
+            |e| StepResult {
                 name: format!("[assert] {name}"),
                 status: StepStatus::Failed,
-                message: "LLM assertion call failed (server down?)".into(),
+                message: format!("LLM assertion call failed: {e}"),
             },
             |lr| {
                 usage.record_llm_call(
@@ -791,10 +791,10 @@ impl ScenarioRunner {
         .unwrap();
 
         response.map_or_else(
-            || StepResult {
+            |e| StepResult {
                 name: format!("[assert] {preset_name}"),
                 status: StepStatus::Failed,
-                message: "LLM assertion call failed (server down?)".into(),
+                message: format!("LLM assertion call failed: {e}"),
             },
             |lr| {
                 usage.record_llm_call(
@@ -858,10 +858,10 @@ impl ScenarioRunner {
         .unwrap();
 
         response.map_or_else(
-            || StepResult {
+            |e| StepResult {
                 name: "[assert] custom".into(),
                 status: StepStatus::Failed,
-                message: "LLM assertion call failed (server down?)".into(),
+                message: format!("LLM assertion call failed: {e}"),
             },
             |lr| {
                 usage.record_llm_call(
@@ -1174,7 +1174,7 @@ impl ScenarioRunner {
         .unwrap();
 
         match selector {
-            Some(lr) => {
+            Ok(lr) => {
                 usage.record_llm_call(
                     &endpoint_name,
                     &endpoint_clone,
@@ -1191,7 +1191,7 @@ impl ScenarioRunner {
                 eprintln!("      resolved selector: {clean}");
                 Ok(clean)
             }
-            None => Err("LLM element targeting failed (server down?)".to_owned()),
+            Err(e) => Err(format!("LLM element targeting failed: {e}")),
         }
     }
 }

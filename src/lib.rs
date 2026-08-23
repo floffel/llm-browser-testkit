@@ -163,13 +163,51 @@ pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<Strin
     llm_chat_with_usage(llm, system, user)
         .await
         .map(|r| r.content)
+        .ok()
 }
 
 /// Sends a chat completion request to the LLM and returns both the content
 /// and token usage from the API response.
-#[must_use]
-pub async fn llm_chat_with_usage(llm: &LlmConfig, system: &str, user: &str) -> Option<LlmResponse> {
+///
+/// Retries transient failures (network errors, HTTP 429/5xx, invalid
+/// responses) with a short backoff, and returns the last underlying error
+/// instead of collapsing everything into a generic "server down" message.
+///
+/// # Errors
+///
+/// Returns the last underlying error as a human-readable string when every
+/// attempt fails (transport error, non-success HTTP status, response that is
+/// not valid JSON, or a response missing `choices[0].message.content`).
+pub async fn llm_chat_with_usage(
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+) -> Result<LlmResponse, String> {
     let client = http_client(llm.timeout);
+    let mut last_err = String::from("LLM call failed");
+
+    for attempt in 0..3u32 {
+        match llm_chat_once(&client, llm, system, user).await {
+            Ok(resp) => return Ok(resp),
+            Err(err) => {
+                last_err = err;
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt + 1))).await;
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Single LLM chat request attempt; returns the underlying error as text.
+async fn llm_chat_once(
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+) -> Result<LlmResponse, String> {
     let mut payload = serde_json::json!({
         "model": llm.model,
         "messages": [
@@ -194,6 +232,7 @@ pub async fn llm_chat_with_usage(llm: &LlmConfig, system: &str, user: &str) -> O
             }
         }
     }
+
     let mut req = client
         .post(format!("{}/v1/chat/completions", llm.url))
         .header("Content-Type", "application/json");
@@ -205,14 +244,27 @@ pub async fn llm_chat_with_usage(llm: &LlmConfig, system: &str, user: &str) -> O
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let resp = req.json(&payload).send().await.ok()?;
-    let json: Value = resp.json().await.ok()?;
+    let resp = req
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("LLM HTTP request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM endpoint returned HTTP {status}: {body}"));
+    }
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("LLM response not valid JSON: {e}"))?;
     let usage = costs::extract_usage(&json);
     let content = json["choices"][0]["message"]["content"]
         .as_str()
-        .map(String::from)?;
+        .map(String::from)
+        .ok_or_else(|| format!("LLM response missing choices[0].message.content: {json}"))?;
 
-    Some(LlmResponse { content, usage })
+    Ok(LlmResponse { content, usage })
 }
 
 /// JavaScript to extract interactive elements from the current page.
