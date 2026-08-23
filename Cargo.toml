@@ -14,7 +14,7 @@ readme = "README.md"
 default = []
 macros = []
 mcp-server = []
-a2a-server = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes"]
+a2a-server = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [[bin]]
 name = "llm-browser-testkit"
@@ -35,11 +35,11 @@ dbg_macro = "deny"
 nursery = { level = "warn", priority = -1 }
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
+toml = "1"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 headless_chrome = "1"

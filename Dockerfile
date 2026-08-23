@@ -11,7 +11,7 @@ COPY examples/ examples/
 RUN cargo build --release --all-features
 
 # Runtime stage
-FROM alpine:3.21
+FROM alpine:3.23.5
 
 RUN apk add --no-cache chromium chromium-chromedriver ca-certificates
 

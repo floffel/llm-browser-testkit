@@ -16,6 +16,13 @@ use crate::truncate;
 use crate::LlmConfig;
 use crate::DOM_EXTRACT_JS;
 
+/// How long the CDP connection stays open after the browser goes quiet.
+///
+/// `headless_chrome` ships a 30s default and tears down the entire connection
+/// when no traffic arrives for that long; a run must own its connection for
+/// its full duration instead.
+const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// Executes a [`Scenario`] against a real browser with optional LLM
 /// assistance for element targeting and assertions.
 pub struct ScenarioRunner {
@@ -177,6 +184,15 @@ impl ScenarioRunner {
             headless: browser_headless,
             window_size: Some((self.viewport_width, self.viewport_height)),
             sandbox: false,
+            // headless_chrome defaults this to 30s and shuts down the whole CDP
+            // connection when no messages arrive for that long. A scenario can
+            // easily exceed 30s of browser silence (slow LLM targeting/assertion
+            // calls, page waits, budget checks between steps), after which every
+            // remaining step fails with "Unable to make method calls because
+            // underlying connection is closed" — one quiet gap kills the run.
+            // Open-ended scenarios must own the connection for their full
+            // duration, so keep it alive for 6 hours.
+            idle_browser_timeout: BROWSER_IDLE_TIMEOUT,
             ..LaunchOptions::default()
         };
 
