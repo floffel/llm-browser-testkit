@@ -133,7 +133,7 @@ impl McpClient {
         let id = self.next_id;
         self.next_id += 1;
         match &mut self.transport {
-            McpTransport::Stdio(ref mut child) => send_request_stdio(id, child, request),
+            McpTransport::Stdio(child) => send_request_stdio(id, child, request),
             McpTransport::Http { .. } => {
                 anyhow::bail!("MCP HTTP transport not yet implemented")
             }
