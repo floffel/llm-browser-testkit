@@ -93,6 +93,16 @@ enum Command {
         /// Port for the A2A agent server (enables a2a-server mode).
         #[arg(long, env = "A2A_SERVER_PORT")]
         agent_port: Option<u16>,
+
+        /// Directory for failure artifacts (screenshots).
+        /// (default: `HARNESS_ARTIFACTS_DIR` or `artifacts`).
+        #[arg(long, env = "HARNESS_ARTIFACTS_DIR")]
+        artifacts_dir: Option<String>,
+
+        /// Continue running remaining steps after a step failure
+        /// (default: fail fast — the first failed step ends the test).
+        #[arg(long)]
+        continue_on_failure: bool,
     },
 }
 
@@ -141,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
             max_tokens,
             budget_enforcement,
             agent_port,
+            artifacts_dir,
+            continue_on_failure,
         } => {
             let toml_content = std::fs::read_to_string(&scenario)
                 .with_context(|| format!("reading {}", scenario.display()))?;
@@ -213,6 +225,28 @@ async fn main() -> anyhow::Result<()> {
                     port,
                 });
             }
+
+            // CLI failure-behavior overrides (only when the flag was passed,
+            // so per-scenario [config] values keep their precedence).
+            if let Some(dir) = artifacts_dir {
+                config.artifacts_dir = Some(dir);
+            }
+            if continue_on_failure {
+                config.continue_on_failure = true;
+            }
+            let artifacts_dir = config
+                .artifacts_dir
+                .clone()
+                .unwrap_or_else(|| "artifacts".to_owned());
+            eprintln!(
+                "Artifacts: {}  |  Continue on failure: {}",
+                artifacts_dir,
+                if config.continue_on_failure {
+                    "yes"
+                } else {
+                    "no (fail fast)"
+                }
+            );
 
             eprintln!("Base URL: {}", config.base_url.as_deref().unwrap_or("—"));
             eprintln!("Endpoints: {} configured", config.endpoints.len());

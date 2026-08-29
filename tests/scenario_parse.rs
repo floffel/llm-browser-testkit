@@ -285,3 +285,77 @@ steps = []
     assert_eq!(c.thinking, Some(true));
     assert!(c.model_params.contains_key("effort"));
 }
+
+#[test]
+fn test_continue_on_failure_and_artifacts_dir_defaults() {
+    let toml = r#"
+[[test]]
+name = "dummy"
+steps = []
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse");
+    assert!(
+        !scenario.config.continue_on_failure,
+        "default should be fail-fast"
+    );
+    assert_eq!(scenario.config.artifacts_dir, None);
+}
+
+#[test]
+fn test_continue_on_failure_and_artifacts_dir_override() {
+    let toml = r#"
+[config]
+continue_on_failure = true
+artifacts_dir = "ci-artifacts"
+
+[[test]]
+name = "dummy"
+steps = []
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse");
+    assert!(scenario.config.continue_on_failure);
+    assert_eq!(
+        scenario.config.artifacts_dir.as_deref(),
+        Some("ci-artifacts")
+    );
+}
+
+#[test]
+fn test_wait_step_text() {
+    let toml = r##"
+[[test]]
+name = "text wait"
+steps = [
+    { kind = "wait", target = "the success message", text = "Welcome back", timeout_ms = 5000 },
+    { kind = "wait", target = "element and text", selector = "#panel", text = "Loaded", timeout_ms = 8000 }
+]
+"##;
+    let scenario: Scenario = toml::from_str(toml).expect("parse");
+    let steps = &scenario.test[0].steps;
+    match &steps[0] {
+        llm_browser_testkit::scenario::TestStep::Wait {
+            selector,
+            text,
+            timeout_ms,
+            ..
+        } => {
+            assert!(selector.is_none());
+            assert_eq!(text.as_deref(), Some("Welcome back"));
+            assert_eq!(timeout_ms, &Some(5000));
+        }
+        _ => panic!("expected Wait step"),
+    }
+    match &steps[1] {
+        llm_browser_testkit::scenario::TestStep::Wait {
+            selector,
+            text,
+            timeout_ms,
+            ..
+        } => {
+            assert_eq!(selector.as_deref(), Some("#panel"));
+            assert_eq!(text.as_deref(), Some("Loaded"));
+            assert_eq!(timeout_ms, &Some(8000));
+        }
+        _ => panic!("expected Wait step"),
+    }
+}

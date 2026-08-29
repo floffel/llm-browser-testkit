@@ -81,7 +81,7 @@ Every step has a `kind`. Required fields depend on the kind.
 | `navigate` | Open a URL | `url` | `wait_after_ms` |
 | `click` | Click an element | `target` | `selector`, `wait_after_ms`, `endpoint` |
 | `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms`, `endpoint` |
-| `wait` | Wait for an element | `target` | `selector`, `timeout_ms`, `endpoint` |
+| `wait` | Wait for an element and/or visible text | `target` | `selector`, `text`, `timeout_ms`, `endpoint` |
 | `assert` | Check the page | one of `definition`, `preset`, or `prompt` | `assert_text`, `endpoint` |
 | `screenshot` | Save a .png | — | `path` |
 | `agent` | Call an A2A agent | `agent`, `task` | `definition` |
@@ -93,6 +93,57 @@ LLM with an explicit `selector`.
 
 **`endpoint`** routes this step to a specific [endpoint](#endpoints). Use it to
 send element targeting to one model and assertions to another.
+
+**`wait` with `text`** waits until the page's visible text contains a
+substring — no selector or LLM needed:
+
+```toml
+[[test.steps]]
+kind = "wait"
+target = "the success message"
+text = "Welcome back"
+timeout_ms = 5000
+```
+
+Set both `selector` and `text` to require both conditions. The combined wait
+shares one `timeout_ms` budget.
+
+## Failure diagnostics & artifacts
+
+When a step fails, the runner captures the current page state and writes a
+screenshot, so CI logs answer *why* the step failed instead of printing a bare
+timeout:
+
+```
+❌ [wait] the authenticated shell — wait for app-account-shell timed out after
+30000ms: The event waited for never came — page: http://127.0.0.1:8082/auth/login
+(Immosai) — visible: "E-Mail-Adresse ⏎ Passwort ⏎ Anmelden"
+    │ url:      http://127.0.0.1:8082/auth/login
+    │ title:    Immosai — Anmeldung
+    │ content:  E-Mail-Adresse  Passwort  ...  Die eingegebenen Zugangsdaten sind ungültig.
+    📸 screenshot: artifacts/account__login-and-open-account__006-wait.png
+```
+
+- **Page state** — URL, title, visible text, and any alert/error elements
+  (`[role="alert"]`, `.error-message`, snackbars, …) are appended to the step
+  message and printed in full to stderr.
+- **Screenshots** — one PNG per failed step, written under
+  `--artifacts-dir` (default `artifacts/`, env `HARNESS_ARTIFACTS_DIR`).
+- **Fail fast** — by default the first failed step ends the test and the
+  remaining steps are reported as skipped (no LLM budget is burned asserting
+  against a page that is already known broken). Set
+  `continue_on_failure = true` in `[config]` or pass `--continue-on-failure`
+  to keep executing every step.
+- **LLM element targeting is verified** — a response that is not a selector
+  (`:not(*)`, `null`, explanations, …) fails immediately with the raw LLM
+  output; a selector that matches nothing triggers one retry with feedback.
+- **LLM errors are specific** — HTTP status, a truncated response-body
+  snippet, and the attempt count are included, and deterministic client
+  errors (401/403/404) fail fast instead of burning three retries.
+- **Assertions always see the page** — custom `system`+`user_template`
+  definitions that omit the `{content}` placeholder automatically get the
+  page URL/title/content appended, so the LLM never answers "I can't
+  determine that without seeing the page".
 
 ## Assertion presets
 
@@ -114,7 +165,8 @@ prompt = "Does the page have a heading that says 'Example Domain'?"
 
 Custom presets with `system` + `user_template` let you define reusable assertion
 logic with template variables `{url}`, `{title}`, `{content}`, `{expected_text}`,
-and `{description}`:
+and `{description}`. Forgetting `{content}` is no longer a problem — the page
+context is appended automatically whenever the template does not reference it:
 
 ```toml
 [[definitions]]
@@ -146,6 +198,8 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 | `--max-cost` | — | Global budget: max USD across all tests |
 | `--max-tokens` | — | Global budget: max tokens across all tests |
 | `--budget-enforcement` | `hard` | Budget mode: `hard` (abort) or `soft` (warn) |
+| `--artifacts-dir` | `$HARNESS_ARTIFACTS_DIR` or `artifacts` | Directory for failure screenshots |
+| `--continue-on-failure` | off | Keep running remaining steps after a step failure (default: fail fast) |
 
 CLI flags override the scenario `[config]`.
 

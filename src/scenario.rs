@@ -131,6 +131,16 @@ pub struct ScenarioConfig {
     /// A2A agent server exposure configuration.
     #[serde(default)]
     pub a2a_server: Option<A2aServerConfig>,
+    /// Whether to continue running the remaining steps of a test after a
+    /// step fails. Default `false` = fail fast: the first failed step ends
+    /// the test and the rest are reported as skipped. Set to `true` to run
+    /// every step (more diagnostics, more LLM cost on broken apps).
+    #[serde(default)]
+    pub continue_on_failure: bool,
+    /// Directory for failure artifacts (screenshots, page snapshots).
+    /// Defaults to `artifacts`.
+    #[serde(default)]
+    pub artifacts_dir: Option<String>,
 }
 
 /// A named endpoint definition with pricing.
@@ -430,6 +440,11 @@ pub enum TestStep {
         /// Explicit CSS selector override (bypasses LLM resolution).
         #[serde(default)]
         selector: Option<String>,
+        /// Wait until the page's visible text contains this substring
+        /// (alternative to `selector`; either or both may be set — both are
+        /// required to hold when both are set).
+        #[serde(default)]
+        text: Option<String>,
         /// Maximum milliseconds to wait (default: 10000).
         #[serde(default)]
         timeout_ms: Option<u64>,

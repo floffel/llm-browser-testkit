@@ -22,6 +22,8 @@ pub mod a2a;
 pub mod budgets;
 /// Cost calculation, usage tracking, and pricing.
 pub mod costs;
+/// Failure diagnostics — page-state capture and artifact writing.
+pub mod diagnostics;
 /// Endpoint registry and routing resolver.
 pub mod endpoints;
 /// MCP client for connecting to external MCP servers.
@@ -34,6 +36,8 @@ pub mod reporting;
 pub mod runner;
 /// Declarative TOML-based test scenario types.
 pub mod scenario;
+/// CSS selector sanitization for LLM-generated selectors.
+pub mod selectors;
 
 /// A2A agent server for accepting agent tasks.
 #[cfg(feature = "a2a-server")]
@@ -172,6 +176,10 @@ pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<Strin
 /// Retries transient failures (network errors, HTTP 429/5xx, invalid
 /// responses) with a short backoff, and returns the last underlying error
 /// instead of collapsing everything into a generic "server down" message.
+/// The error text includes the HTTP status and a truncated response-body
+/// snippet, so a gateway that answers with an HTML error page is
+/// identifiable in CI logs instead of surfacing as a bare JSON decode
+/// error.
 ///
 /// # Errors
 ///
@@ -185,20 +193,94 @@ pub async fn llm_chat_with_usage(
 ) -> Result<LlmResponse, String> {
     let client = http_client(llm.timeout);
     let mut last_err = String::from("LLM call failed");
+    let mut attempts: u32 = 0;
 
-    for attempt in 0..3u32 {
+    while attempts < LLM_CALL_ATTEMPTS {
+        attempts += 1;
         match llm_chat_once(&client, llm, system, user).await {
             Ok(resp) => return Ok(resp),
             Err(err) => {
-                last_err = err;
-                if attempt < 2 {
-                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt + 1))).await;
+                last_err = err.to_string();
+                if attempts >= LLM_CALL_ATTEMPTS || !err.is_retryable() {
+                    break;
                 }
+                tokio::time::sleep(Duration::from_millis(500 * u64::from(attempts))).await;
             }
         }
     }
 
-    Err(last_err)
+    Err(format!(
+        "LLM call failed after {attempts} attempt(s) (endpoint {url}): {last_err}",
+        url = llm.url
+    ))
+}
+
+/// Number of attempts for a single chat completion call.
+const LLM_CALL_ATTEMPTS: u32 = 3;
+
+/// Internal error type for a single LLM request attempt, distinguishing
+/// transient failures (worth retrying) from deterministic configuration
+/// errors (fail immediately).
+enum LlmCallError {
+    /// Transport-level failure (connect, timeout, TLS, …).
+    Transport { message: String },
+    /// Non-success HTTP status with a body snippet.
+    Http { status: u16, body: String },
+    /// Success status but the body is not valid JSON.
+    InvalidJson {
+        status: u16,
+        detail: String,
+        body: String,
+    },
+    /// Valid JSON but missing `choices[0].message.content`.
+    MissingContent { json: String },
+}
+
+impl std::fmt::Display for LlmCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport { message } => write!(f, "LLM HTTP request failed: {message}"),
+            Self::Http { status, body } => {
+                write!(
+                    f,
+                    "LLM endpoint returned HTTP {status}: {}",
+                    truncate(body, 300)
+                )
+            }
+            Self::InvalidJson {
+                status,
+                detail,
+                body,
+            } => write!(
+                f,
+                "LLM endpoint returned HTTP {status} with non-JSON body ({detail}): {}",
+                truncate(body, 300)
+            ),
+            Self::MissingContent { json } => write!(
+                f,
+                "LLM response missing choices[0].message.content: {}",
+                truncate(json, 300)
+            ),
+        }
+    }
+}
+
+impl LlmCallError {
+    /// Whether another attempt may succeed. Network errors, rate limits,
+    /// server errors, and 200-with-garbage responses can be transient on
+    /// flaky gateways; auth/not-found errors are deterministic.
+    #[must_use]
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport { .. } | Self::MissingContent { .. } => true,
+            Self::Http { status, .. } => {
+                *status == 408 || *status == 429 || (500..600).contains(status)
+            }
+            Self::InvalidJson { status, .. } => {
+                *status == 200 || *status == 408 || *status == 429 || (500..600).contains(status)
+            }
+        }
+    }
 }
 
 /// Single LLM chat request attempt; returns the underlying error as text.
@@ -207,7 +289,7 @@ async fn llm_chat_once(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-) -> Result<LlmResponse, String> {
+) -> Result<LlmResponse, LlmCallError> {
     let mut payload = serde_json::json!({
         "model": llm.model,
         "messages": [
@@ -248,21 +330,35 @@ async fn llm_chat_once(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("LLM HTTP request failed: {e}"))?;
+        .map_err(|e| LlmCallError::Transport {
+            message: e.to_string(),
+        })?;
     let status = resp.status();
+    let status_u16 = status.as_u16();
+    let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM endpoint returned HTTP {status}: {body}"));
+        return Err(LlmCallError::Http {
+            status: status_u16,
+            body,
+        });
     }
-    let json: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("LLM response not valid JSON: {e}"))?;
+    let json: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(LlmCallError::InvalidJson {
+                status: status_u16,
+                detail: e.to_string(),
+                body,
+            });
+        }
+    };
     let usage = costs::extract_usage(&json);
     let content = json["choices"][0]["message"]["content"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| format!("LLM response missing choices[0].message.content: {json}"))?;
+        .ok_or_else(|| LlmCallError::MissingContent {
+            json: json.to_string(),
+        })?;
 
     Ok(LlmResponse { content, usage })
 }

@@ -1,0 +1,37 @@
+# Demonstrates wait-with-text, failure diagnostics, and fail-fast.
+#
+# Run (mock-LLM friendly — the explicit selectors below make it work even
+# without a real LLM endpoint; only the final assert needs one):
+#
+#   llm-browser-testkit run examples/diagnostics-and-text-wait.toml \
+#     --base-url http://localhost:4200 --llm-url <url> --llm-model <model>
+
+[config]
+base_url = "http://localhost:4200"
+start_url = "/"
+timeout_secs = 60
+# Failure artifacts (screenshots + page state on failed steps):
+artifacts_dir = "artifacts"
+# Default: fail fast — the first failed step ends the test.
+# continue_on_failure = true   # opt out
+
+[[test]]
+name = "Text wait and login diagnostics"
+steps = [
+    { kind = "navigate", url = "/login", wait_after_ms = 500 },
+    # Wait for visible text without any selector or LLM call:
+    { kind = "wait", target = "the login form", text = "Password", timeout_ms = 10000 },
+    # Combined wait: element AND text must both appear within one timeout:
+    { kind = "wait", target = "the submit button", selector = "button[type=submit]", text = "Log in", timeout_ms = 10000 },
+    { kind = "assert", prompt = "Does the page show a login form?" },
+]
+
+[[test]]
+name = "Deliberate failure shows diagnostics"
+steps = [
+    { kind = "navigate", url = "/login", wait_after_ms = 500 },
+    # This element does not exist: the step fails and the runner prints the
+    # page URL/title/text and saves artifacts/<test>__...-wait.png.
+    { kind = "wait", target = "a nonexistent element", selector = "#does-not-exist", timeout_ms = 3000 },
+    { kind = "assert", prompt = "This step is skipped because the wait failed." },
+]

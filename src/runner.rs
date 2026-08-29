@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use headless_chrome::{Browser, LaunchOptions, Tab};
@@ -8,10 +9,12 @@ use headless_chrome::{Browser, LaunchOptions, Tab};
 use crate::a2a::A2aClient;
 use crate::budgets::{BudgetStatus, BudgetTracker};
 use crate::costs::UsageTracker;
+use crate::diagnostics;
 use crate::endpoints::{EndpointRegistry, TaskType};
 use crate::llm_chat_with_usage;
 use crate::mcp_client::McpClient;
 use crate::scenario::{AssertDefinition, ScenarioConfig, TestGroup, TestStep};
+use crate::selectors::{sanitize_selector, selector_is_useless, validate_selector};
 use crate::truncate;
 use crate::LlmConfig;
 use crate::DOM_EXTRACT_JS;
@@ -35,6 +38,8 @@ pub struct ScenarioRunner {
     endpoints: EndpointRegistry,
     usage: Arc<UsageTracker>,
     budgets: BudgetTracker,
+    /// Directory for failure artifacts (screenshots).
+    artifacts_dir: PathBuf,
 }
 
 /// Aggregated results from a scenario run.
@@ -107,10 +112,8 @@ impl ScenarioRunner {
     /// Creates a new runner with the given scenario configuration and
     /// assertion definitions.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(scenario_config: ScenarioConfig, definitions: Vec<AssertDefinition>) -> Self {
-        let endpoints = EndpointRegistry::from_config(&scenario_config.endpoints);
-        let budgets = BudgetTracker::from_config(&scenario_config.budgets);
-
         let llm = LlmConfig {
             url: scenario_config
                 .llm_url
@@ -134,6 +137,8 @@ impl ScenarioRunner {
             thinking: scenario_config.thinking,
             model_params: scenario_config.model_params.clone(),
         };
+        let endpoints = EndpointRegistry::from_config(&scenario_config.endpoints, Some(&llm));
+        let budgets = BudgetTracker::from_config(&scenario_config.budgets);
         let defs_map: HashMap<String, AssertDefinition> = definitions
             .into_iter()
             .map(|d| (d.name.clone(), d))
@@ -143,12 +148,18 @@ impl ScenarioRunner {
             timeout: Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60)),
             viewport_width: scenario_config.viewport_width.unwrap_or(1280),
             viewport_height: scenario_config.viewport_height.unwrap_or(720),
-            config: scenario_config,
+            config: scenario_config.clone(),
             definitions: defs_map,
             llm,
             endpoints,
             usage: Arc::new(UsageTracker::new()),
             budgets,
+            artifacts_dir: PathBuf::from(
+                scenario_config
+                    .artifacts_dir
+                    .clone()
+                    .unwrap_or_else(|| "artifacts".to_owned()),
+            ),
         }
     }
 
@@ -285,7 +296,7 @@ impl ScenarioRunner {
 
         let mut result = TestRunResult::default();
 
-        for step in &test.steps {
+        for (step_index, step) in test.steps.iter().enumerate() {
             result.total += 1;
 
             let wait_ms = match step {
@@ -295,7 +306,7 @@ impl ScenarioRunner {
                 _ => None,
             };
 
-            let step_result = match step {
+            let mut step_result = match step {
                 TestStep::Navigate { url, .. } => {
                     let full_url = resolve_url(url, &base_url);
                     run_navigate_step(&full_url, tab)
@@ -329,11 +340,13 @@ impl ScenarioRunner {
                 TestStep::Wait {
                     target,
                     selector,
+                    text,
                     timeout_ms,
                     endpoint,
                 } => self.run_wait(
                     target,
                     selector.as_deref(),
+                    text.as_deref(),
                     *timeout_ms,
                     endpoint.as_deref(),
                     test.endpoint.as_deref(),
@@ -363,6 +376,30 @@ impl ScenarioRunner {
                 TestStep::Mcp { server, tool, args } => self.run_mcp(server, tool, args.as_ref()),
             };
 
+            // Failure diagnostics: capture the page state and a screenshot so
+            // CI logs say WHAT the page looked like when the step failed,
+            // instead of a bare "timed out: The event waited for never came".
+            if step_result.status == StepStatus::Failed {
+                let state = diagnostics::capture(tab);
+                let screenshot = diagnostics::save_screenshot(
+                    tab,
+                    &self.artifacts_dir,
+                    &test.name,
+                    &test.name,
+                    step_index,
+                    &step_kind_label(step),
+                );
+                step_result.message = format!(
+                    "{base} — {excerpt}",
+                    base = step_result.message,
+                    excerpt = diagnostics::inline_excerpt(&state),
+                );
+                eprintln!(
+                    "{}",
+                    diagnostics::full_context(&state, screenshot.as_deref())
+                );
+            }
+
             eprintln!(
                 "    {} {} — {}",
                 if step_result.status == StepStatus::Passed {
@@ -380,6 +417,37 @@ impl ScenarioRunner {
                 StepStatus::Passed => result.passed += 1,
                 StepStatus::Failed => result.failed += 1,
                 StepStatus::Skipped => result.skipped += 1,
+            }
+
+            // Fail fast: the first failed step ends the test and the
+            // remaining steps are reported as skipped (no LLM budget is
+            // burned asserting against a page that is already known broken).
+            if step_result.status == StepStatus::Failed
+                && !self.config.continue_on_failure
+                && step_index + 1 < test.steps.len()
+            {
+                eprintln!(
+                    "      ⏭️  {}",
+                    format!(
+                        "failing fast: {} remaining step(s) skipped (set continue_on_failure = true in [config] to disable)",
+                        test.steps.len() - step_index - 1
+                    )
+                );
+                for skipped in &test.steps[step_index + 1..] {
+                    result.total += 1;
+                    result.skipped += 1;
+                    eprintln!(
+                        "    ⏭️  {} — skipped: previous step failed",
+                        step_label(skipped)
+                    );
+                    result.details.push(StepResult {
+                        name: step_label(skipped),
+                        status: StepStatus::Skipped,
+                        message: "skipped: previous step failed".into(),
+                    });
+                }
+                result.details.push(step_result);
+                return result;
             }
 
             // Check per-test budget after each step
@@ -445,7 +513,7 @@ impl ScenarioRunner {
             }
         };
 
-        match tab.wait_for_element(&selector) {
+        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(10)) {
             Ok(element) => match element.click() {
                 Ok(_) => StepResult {
                     name: format!("[click] {target}"),
@@ -493,7 +561,7 @@ impl ScenarioRunner {
             }
         };
 
-        match tab.wait_for_element(&selector) {
+        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(10)) {
             Ok(element) => {
                 if let Err(e) = element.click() {
                     return StepResult {
@@ -535,40 +603,106 @@ impl ScenarioRunner {
         &self,
         target: &str,
         selector_override: Option<&str>,
+        text: Option<&str>,
         timeout_ms: Option<u64>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
         tab: &Tab,
     ) -> StepResult {
-        let selector = match self.resolve_selector(
-            selector_override,
-            target,
-            step_endpoint,
-            test_endpoint,
-            tab,
-        ) {
-            Ok(s) => s,
-            Err(msg) => {
-                return StepResult {
-                    name: format!("[wait] {target}"),
-                    status: StepStatus::Failed,
-                    message: msg,
-                };
-            }
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(10_000));
+        let step_name = format!("[wait] {target}");
+
+        // Resolve an explicit selector only (text-only waits are LLM-free).
+        let selector = match selector_override {
+            Some(s) => Some(s.to_owned()),
+            None if text.is_some() => None,
+            None => match self.resolve_selector(None, target, step_endpoint, test_endpoint, tab) {
+                Ok(s) => Some(s),
+                Err(msg) => {
+                    return StepResult {
+                        name: step_name,
+                        status: StepStatus::Failed,
+                        message: msg,
+                    };
+                }
+            },
         };
 
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(10_000));
+        if text.is_some() {
+            let sel_js = selector
+                .as_deref()
+                .map(crate::selectors::selector_matches_js);
+            let text_js = text.map(|t| {
+                let escaped = t.replace('\\', "\\\\").replace('\'', "\\'");
+                format!("document.body ? document.body.innerText.includes('{escaped}') : false")
+            });
 
-        match tab.wait_for_element_with_custom_timeout(&selector, timeout) {
-            Ok(_) => StepResult {
-                name: format!("[wait] {target}"),
-                status: StepStatus::Passed,
-                message: format!("found {selector}"),
+            let deadline = Instant::now() + timeout;
+            loop {
+                let sel_ok = match &sel_js {
+                    Some(js) => eval_bool(tab, js).unwrap_or(false),
+                    None => true,
+                };
+                let text_ok = match &text_js {
+                    Some(js) => eval_bool(tab, js).unwrap_or(false),
+                    None => true,
+                };
+                if sel_ok && text_ok {
+                    let mut what = Vec::new();
+                    if let Some(sel) = &selector {
+                        what.push(format!("found {sel}"));
+                    }
+                    if let Some(t) = text {
+                        what.push(format!("text {t:?} visible"));
+                    }
+                    return StepResult {
+                        name: step_name,
+                        status: StepStatus::Passed,
+                        message: what.join(" and "),
+                    };
+                }
+                if Instant::now() >= deadline {
+                    let mut what = Vec::new();
+                    if let Some(sel) = &selector {
+                        what.push(format!("{sel}"));
+                    }
+                    if let Some(t) = text {
+                        what.push(format!("text {t:?}"));
+                    }
+                    return StepResult {
+                        name: step_name,
+                        status: StepStatus::Failed,
+                        message: format!(
+                            "wait for {} timed out after {}ms: the event waited for never came",
+                            what.join(" / "),
+                            timeout.as_millis(),
+                        ),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+
+        match selector.as_deref() {
+            Some(sel) => match tab.wait_for_element_with_custom_timeout(sel, timeout) {
+                Ok(_) => StepResult {
+                    name: step_name,
+                    status: StepStatus::Passed,
+                    message: format!("found {sel}"),
+                },
+                Err(e) => StepResult {
+                    name: step_name,
+                    status: StepStatus::Failed,
+                    message: format!(
+                        "wait for {sel} timed out after {}ms: {e}",
+                        timeout.as_millis()
+                    ),
+                },
             },
-            Err(e) => StepResult {
-                name: format!("[wait] {target}"),
+            None => StepResult {
+                name: step_name,
                 status: StepStatus::Failed,
-                message: format!("wait for {selector} timed out: {e}"),
+                message: "wait step has neither selector nor text".into(),
             },
         }
     }
@@ -695,6 +829,21 @@ impl ScenarioRunner {
             .replace("{expected_text}", assert_text.unwrap_or(""))
             .replace("{description}", "");
 
+        // Custom preset definitions frequently forget the {content}
+        // placeholder — without it the LLM has no page to evaluate and
+        // answers "I can't determine that without seeing the page". Always
+        // append the page context unless the template already references it.
+        let user_prompt = if template.contains("{content}") {
+            user_prompt
+        } else {
+            format!(
+                "{user_prompt}\n\nPage URL: {url}\nPage Title: {title}\n\nPage Content:\n{content}",
+                url = page_content.url,
+                title = page_content.title,
+                content = page_content.body_text,
+            )
+        };
+
         eprintln!("      assert: {name} (custom preset)");
 
         let endpoint = self
@@ -769,6 +918,19 @@ impl ScenarioRunner {
             .replace("{content}", &page_content.body_text)
             .replace("{expected_text}", assert_text.unwrap_or(""))
             .replace("{description}", "");
+
+        // Same safety net as custom presets: never let the LLM answer with
+        // no page context at all.
+        let user_prompt = if preset.user_template.contains("{content}") {
+            user_prompt
+        } else {
+            format!(
+                "{user_prompt}\n\nPage URL: {url}\nPage Title: {title}\n\nPage Content:\n{content}",
+                url = page_content.url,
+                title = page_content.title,
+                content = page_content.body_text,
+            )
+        };
 
         eprintln!("      assert: {preset_name}");
 
@@ -1118,6 +1280,12 @@ impl ScenarioRunner {
     /// Resolves a CSS selector for the target element. Uses the explicit
     /// `selector` if provided, otherwise asks the LLM to find the element
     /// from the natural language `target` description and page DOM.
+    ///
+    /// LLM responses are sanitized and verified against the live page: a
+    /// response that is not a selector (empty, `:not(*)`, `null`, …) fails
+    /// immediately with the raw LLM output, and a selector that matches
+    /// nothing triggers one retry with feedback before failing.
+    #[allow(clippy::too_many_lines)]
     fn resolve_selector(
         &self,
         css_override: Option<&str>,
@@ -1152,6 +1320,16 @@ impl ScenarioRunner {
             target,
         );
 
+        let retry_user = format!(
+            "Your previous answer was not usable. {}\n\nPage URL: {}\nPage Title: {}\n\nPage body text (first 4000 chars):\n{}\n\nInteractive elements:\n{}\n\nFind the CSS selector for: {}\nReturn ONLY a single CSS selector that matches an existing element. No explanations.",
+            "The selector must match at least one element currently present on the page.",
+            page_content.url,
+            page_content.title,
+            truncate(&page_content.body_text, 4000),
+            dom_info,
+            target,
+        );
+
         eprintln!("      LLM targeting: {target}");
 
         let endpoint = self
@@ -1163,37 +1341,103 @@ impl ScenarioRunner {
         let endpoint_clone = endpoint.clone();
         let sys = system.to_owned();
 
-        let selector = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(llm_chat_with_usage(&llm, &sys, &user))
-        })
-        .join()
-        .unwrap();
+        let call_llm = |prompt: &str| {
+            let llm = llm.clone();
+            let sys = sys.clone();
+            let prompt = prompt.to_owned();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(llm_chat_with_usage(&llm, &sys, &prompt))
+            })
+            .join()
+            .unwrap()
+        };
 
-        match selector {
-            Ok(lr) => {
-                usage.record_llm_call(
-                    &endpoint_name,
-                    &endpoint_clone,
-                    lr.usage.prompt_tokens,
-                    lr.usage.completion_tokens,
-                );
-                let clean = lr
-                    .content
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .trim_matches('`')
-                    .to_owned();
-                eprintln!("      resolved selector: {clean}");
-                Ok(clean)
+        let first = call_llm(&user);
+        let lr = match first {
+            Ok(lr) => lr,
+            Err(e) => {
+                return Err(format!("LLM element targeting failed: {e}"));
             }
-            Err(e) => Err(format!("LLM element targeting failed: {e}")),
+        };
+        usage.record_llm_call(
+            &endpoint_name,
+            &endpoint_clone,
+            lr.usage.prompt_tokens,
+            lr.usage.completion_tokens,
+        );
+        let clean = sanitize_selector(&lr.content);
+        eprintln!("      resolved selector: {clean}");
+
+        if selector_is_useless(&clean) {
+            return Err(format!(
+                "LLM element targeting failed: the LLM did not return a usable selector for {target:?} (got {raw:?}). Check the page state in the diagnostics above.",
+                raw = lr.content.trim(),
+            ));
         }
+        if let Err(reason) = validate_selector(&clean) {
+            return Err(format!(
+                "LLM element targeting failed: invalid selector for {target:?}: {reason} (LLM response: {raw:?})",
+                raw = lr.content.trim(),
+            ));
+        }
+        if !selector_matches(tab, &clean).unwrap_or(false) {
+            // One retry with feedback: flaky models occasionally invent a
+            // selector that does not exist on the page.
+            eprintln!(
+                "      selector {clean} matches nothing — retrying LLM targeting with feedback"
+            );
+            let second = call_llm(&retry_user);
+            let lr2 = match second {
+                Ok(lr2) => lr2,
+                Err(e) => {
+                    return Err(format!(
+                        "LLM element targeting failed: first answer {clean:?} matched nothing, retry also failed: {e}"
+                    ));
+                }
+            };
+            usage.record_llm_call(
+                &endpoint_name,
+                &endpoint_clone,
+                lr2.usage.prompt_tokens,
+                lr2.usage.completion_tokens,
+            );
+            let clean2 = sanitize_selector(&lr2.content);
+            eprintln!("      resolved selector (retry): {clean2}");
+            if selector_is_useless(&clean2) {
+                return Err(format!(
+                    "LLM element targeting failed: selector {clean:?} matched nothing; the retry returned no usable selector for {target:?} (got {raw:?}). Page excerpt: {excerpt}",
+                    raw = lr2.content.trim(),
+                    excerpt = truncate(&page_content.body_text, 300),
+                ));
+            }
+            if !selector_matches(tab, &clean2).unwrap_or(false) {
+                return Err(format!(
+                    "LLM element targeting failed: selector {clean2:?} does not match any element on the page for {target:?}. Verify the page state in the diagnostics; the login/SPA may not have rendered."
+                ));
+            }
+            return Ok(clean2);
+        }
+
+        Ok(clean)
     }
+}
+
+/// Evaluates a JS expression that is expected to return a boolean.
+fn eval_bool(tab: &Tab, js: &str) -> Result<bool, String> {
+    tab.evaluate(js, false)
+        .map_err(|e| format!("evaluate failed: {e}"))?
+        .value
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| "evaluate returned non-boolean".to_owned())
+}
+
+/// Checks whether a CSS selector matches at least one current element.
+fn selector_matches(tab: &Tab, selector: &str) -> Result<bool, String> {
+    eval_bool(tab, &crate::selectors::selector_matches_js(selector))
 }
 
 // ── Free helper functions ──────────────────────────────────────────────
@@ -1248,7 +1492,10 @@ fn get_page_text(tab: &Tab) -> PageContent {
         .unwrap_or_else(|| "unknown".to_owned());
 
     let body_text = tab
-        .evaluate("document.body ? document.body.innerText : ''", false)
+        .evaluate(
+            "document.body ? document.body.innerText : document.documentElement.innerText",
+            false,
+        )
         .ok()
         .and_then(|r| r.value)
         .and_then(|v| v.as_str().map(String::from))
@@ -1270,6 +1517,51 @@ fn resolve_url(url: &str, base_url: &str) -> String {
         format!("{base}{url}")
     } else {
         format!("{base}/{url}")
+    }
+}
+
+/// Human-readable label for a step, used when steps are skipped after an
+/// earlier failure.
+fn step_label(step: &TestStep) -> String {
+    match step {
+        TestStep::Navigate { url, .. } => format!("[navigate] {url}"),
+        TestStep::Click { target, .. } => format!("[click] {target}"),
+        TestStep::Type { target, .. } => format!("[type] {target}"),
+        TestStep::Wait { target, .. } => format!("[wait] {target}"),
+        TestStep::Assert {
+            definition,
+            preset,
+            prompt,
+            ..
+        } => {
+            if let Some(d) = definition {
+                format!("[assert] {d}")
+            } else if let Some(p) = preset {
+                format!("[assert] {p}")
+            } else if let Some(pr) = prompt {
+                format!("[assert] custom ({})", truncate(pr, 60))
+            } else {
+                "[assert]".to_owned()
+            }
+        }
+        TestStep::Screenshot { .. } => "[screenshot]".to_owned(),
+        TestStep::Agent { agent, .. } => format!("[agent] {agent}"),
+        TestStep::Mcp { server, tool, .. } => format!("[mcp] {server}:{tool}"),
+    }
+}
+
+/// Short kind word for artifact file names (e.g. `click`, `wait`, `assert`).
+#[must_use]
+fn step_kind_label(step: &TestStep) -> &'static str {
+    match step {
+        TestStep::Navigate { .. } => "navigate",
+        TestStep::Click { .. } => "click",
+        TestStep::Type { .. } => "type",
+        TestStep::Wait { .. } => "wait",
+        TestStep::Assert { .. } => "assert",
+        TestStep::Screenshot { .. } => "screenshot",
+        TestStep::Agent { .. } => "agent",
+        TestStep::Mcp { .. } => "mcp",
     }
 }
 

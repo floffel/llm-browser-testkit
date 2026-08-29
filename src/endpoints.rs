@@ -83,12 +83,34 @@ pub struct EndpointRegistry {
 impl EndpointRegistry {
     /// Builds a registry from the endpoint definitions in scenario config.
     ///
-    /// Falls back to a default LLM endpoint derived from env vars / flat
-    /// config fields if no `[config.endpoints]` are defined.
+    /// Falls back to a default LLM endpoint derived from `fallback_llm`
+    /// (the runner's effective config — CLI arguments merged over env vars
+    /// and scenario fields) when no `[config.endpoints]` are defined, so
+    /// `--llm-url` / `--llm-model` / `--llm-api-key` are honored even for
+    /// scenarios without an explicit endpoint table. Without a fallback,
+    /// environment variables are used.
     #[must_use]
-    pub fn from_config(endpoints: &HashMap<String, EndpointConfig>) -> Self {
+    pub fn from_config(
+        endpoints: &HashMap<String, EndpointConfig>,
+        fallback_llm: Option<&crate::LlmConfig>,
+    ) -> Self {
         if endpoints.is_empty() {
-            let default_llm = ResolvedEndpoint::default_llm();
+            let default_llm = match fallback_llm {
+                Some(llm) => ResolvedEndpoint {
+                    name: "default".to_owned(),
+                    endpoint_type: EndpointType::Llm,
+                    url: llm.url.clone(),
+                    model: Some(llm.model.clone()),
+                    api_key: llm.api_key.clone(),
+                    headers: llm.headers.clone(),
+                    command: None,
+                    args: Vec::new(),
+                    input_price_per_1m: 0.0,
+                    output_price_per_1m: 0.0,
+                    per_call_price: 0.0,
+                },
+                None => ResolvedEndpoint::default_llm(),
+            };
             let mut map = HashMap::new();
             let mut default_for = HashMap::new();
             for tt in &[TaskType::Targeting, TaskType::Assertion] {
@@ -206,7 +228,7 @@ mod tests {
     #[test]
     fn test_registry_empty_config() {
         let endpoints = HashMap::new();
-        let registry = EndpointRegistry::from_config(&endpoints);
+        let registry = EndpointRegistry::from_config(&endpoints, None);
         assert_eq!(registry.len(), 1);
         let ep = registry.get("default").unwrap();
         assert_eq!(ep.endpoint_type, EndpointType::Llm);
@@ -225,7 +247,7 @@ mod tests {
             },
         );
 
-        let registry = EndpointRegistry::from_config(&endpoints);
+        let registry = EndpointRegistry::from_config(&endpoints, None);
         let ep = registry.get("vision");
         assert!(ep.is_some());
         assert_eq!(ep.unwrap().model.as_deref(), Some("gpt-4o"));
@@ -243,7 +265,7 @@ mod tests {
         };
         endpoints.insert("main".to_owned(), ec);
 
-        let registry = EndpointRegistry::from_config(&endpoints);
+        let registry = EndpointRegistry::from_config(&endpoints, None);
         let ep = registry.resolve_for_task(TaskType::Targeting);
         assert_eq!(ep.name, "main");
     }
@@ -269,7 +291,7 @@ mod tests {
             },
         );
 
-        let registry = EndpointRegistry::from_config(&endpoints);
+        let registry = EndpointRegistry::from_config(&endpoints, None);
         let ep = registry.resolve(Some("fast"), TaskType::Targeting);
         assert_eq!(ep.name, "fast");
     }
