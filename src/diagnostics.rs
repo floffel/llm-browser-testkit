@@ -7,7 +7,7 @@
 //! timeout message.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::Path;
 
 use headless_chrome::{protocol::cdp::Page::CaptureScreenshotFormatOption, Tab};
 
@@ -158,7 +158,7 @@ pub fn slugify(name: &str, max_len: usize) -> String {
 #[must_use]
 pub fn save_screenshot(
     tab: &Tab,
-    dir: &PathBuf,
+    dir: &Path,
     scenario: &str,
     test: &str,
     step_index: usize,

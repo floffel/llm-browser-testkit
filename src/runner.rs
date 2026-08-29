@@ -157,7 +157,6 @@ impl ScenarioRunner {
             artifacts_dir: PathBuf::from(
                 scenario_config
                     .artifacts_dir
-                    .clone()
                     .unwrap_or_else(|| "artifacts".to_owned()),
             ),
         }
@@ -387,7 +386,7 @@ impl ScenarioRunner {
                     &test.name,
                     &test.name,
                     step_index,
-                    &step_kind_label(step),
+                    step_kind_label(step),
                 );
                 step_result.message = format!(
                     "{base} — {excerpt}",
@@ -427,11 +426,8 @@ impl ScenarioRunner {
                 && step_index + 1 < test.steps.len()
             {
                 eprintln!(
-                    "      ⏭️  {}",
-                    format!(
-                        "failing fast: {} remaining step(s) skipped (set continue_on_failure = true in [config] to disable)",
-                        test.steps.len() - step_index - 1
-                    )
+                    "      ⏭️  failing fast: {} remaining step(s) skipped (set continue_on_failure = true in [config] to disable)",
+                    test.steps.len() - step_index - 1
                 );
                 for skipped in &test.steps[step_index + 1..] {
                     result.total += 1;
@@ -639,14 +635,12 @@ impl ScenarioRunner {
 
             let deadline = Instant::now() + timeout;
             loop {
-                let sel_ok = match &sel_js {
-                    Some(js) => eval_bool(tab, js).unwrap_or(false),
-                    None => true,
-                };
-                let text_ok = match &text_js {
-                    Some(js) => eval_bool(tab, js).unwrap_or(false),
-                    None => true,
-                };
+                let sel_ok = sel_js
+                    .as_ref()
+                    .is_none_or(|js| eval_bool(tab, js).unwrap_or(false));
+                let text_ok = text_js
+                    .as_ref()
+                    .is_none_or(|js| eval_bool(tab, js).unwrap_or(false));
                 if sel_ok && text_ok {
                     let mut what = Vec::new();
                     if let Some(sel) = &selector {
@@ -664,7 +658,7 @@ impl ScenarioRunner {
                 if Instant::now() >= deadline {
                     let mut what = Vec::new();
                     if let Some(sel) = &selector {
-                        what.push(format!("{sel}"));
+                        what.push(sel.clone());
                     }
                     if let Some(t) = text {
                         what.push(format!("text {t:?}"));
@@ -1533,17 +1527,20 @@ fn step_label(step: &TestStep) -> String {
             preset,
             prompt,
             ..
-        } => {
-            if let Some(d) = definition {
-                format!("[assert] {d}")
-            } else if let Some(p) = preset {
-                format!("[assert] {p}")
-            } else if let Some(pr) = prompt {
-                format!("[assert] custom ({})", truncate(pr, 60))
-            } else {
-                "[assert]".to_owned()
-            }
-        }
+        } => definition.as_ref().map_or_else(
+            || {
+                preset.as_ref().map_or_else(
+                    || {
+                        prompt.as_ref().map_or_else(
+                            || "[assert]".to_owned(),
+                            |pr| format!("[assert] custom ({})", truncate(pr, 60)),
+                        )
+                    },
+                    |p| format!("[assert] {p}"),
+                )
+            },
+            |d| format!("[assert] {d}"),
+        ),
         TestStep::Screenshot { .. } => "[screenshot]".to_owned(),
         TestStep::Agent { agent, .. } => format!("[agent] {agent}"),
         TestStep::Mcp { server, tool, .. } => format!("[mcp] {server}:{tool}"),
@@ -1552,7 +1549,7 @@ fn step_label(step: &TestStep) -> String {
 
 /// Short kind word for artifact file names (e.g. `click`, `wait`, `assert`).
 #[must_use]
-fn step_kind_label(step: &TestStep) -> &'static str {
+const fn step_kind_label(step: &TestStep) -> &'static str {
     match step {
         TestStep::Navigate { .. } => "navigate",
         TestStep::Click { .. } => "click",

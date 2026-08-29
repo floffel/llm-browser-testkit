@@ -95,8 +95,8 @@ impl EndpointRegistry {
         fallback_llm: Option<&crate::LlmConfig>,
     ) -> Self {
         if endpoints.is_empty() {
-            let default_llm = match fallback_llm {
-                Some(llm) => ResolvedEndpoint {
+            let default_llm =
+                fallback_llm.map_or_else(ResolvedEndpoint::default_llm, |llm| ResolvedEndpoint {
                     name: "default".to_owned(),
                     endpoint_type: EndpointType::Llm,
                     url: llm.url.clone(),
@@ -108,9 +108,7 @@ impl EndpointRegistry {
                     input_price_per_1m: 0.0,
                     output_price_per_1m: 0.0,
                     per_call_price: 0.0,
-                },
-                None => ResolvedEndpoint::default_llm(),
-            };
+                });
             let mut map = HashMap::new();
             let mut default_for = HashMap::new();
             for tt in &[TaskType::Targeting, TaskType::Assertion] {
