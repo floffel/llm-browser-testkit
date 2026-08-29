@@ -5,3 +5,4 @@ target/
 *.log
 smoke-result.png
 .kilo/
+/artifacts/
