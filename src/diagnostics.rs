@@ -193,9 +193,7 @@ mod tests {
         PageState {
             url: "http://127.0.0.1:8082/auth/login".into(),
             title: "Immosai — Sign in".into(),
-            visible_text:
-                "Email address\nPassword\nSign in\nInvalid credentials."
-                    .into(),
+            visible_text: "Email address\nPassword\nSign in\nInvalid credentials.".into(),
             alerts: vec!["Invalid credentials.".into()],
         }
     }
