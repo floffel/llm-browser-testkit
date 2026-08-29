@@ -45,6 +45,8 @@ pub struct ResolvedEndpoint {
     pub command: Option<String>,
     /// Arguments for MCP subprocess endpoints.
     pub args: Vec<String>,
+    /// Whether this endpoint accepts image parts (vision).
+    pub vision: bool,
     /// Input token pricing per 1M tokens.
     pub input_price_per_1m: f64,
     /// Output token pricing per 1M tokens.
@@ -66,6 +68,7 @@ impl ResolvedEndpoint {
             headers: crate::parse_headers_env(),
             command: None,
             args: Vec::new(),
+            vision: false,
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
             per_call_price: 0.0,
@@ -105,6 +108,7 @@ impl EndpointRegistry {
                     headers: llm.headers.clone(),
                     command: None,
                     args: Vec::new(),
+                    vision: false,
                     input_price_per_1m: 0.0,
                     output_price_per_1m: 0.0,
                     per_call_price: 0.0,
@@ -142,6 +146,7 @@ impl EndpointRegistry {
                 headers: ec.headers.clone(),
                 command: ec.command.clone(),
                 args: ec.args.clone(),
+                vision: ec.vision,
                 input_price_per_1m: ec.pricing.as_ref().map_or(0.0, |p| p.input_per_1m_tokens),
                 output_price_per_1m: ec.pricing.as_ref().map_or(0.0, |p| p.output_per_1m_tokens),
                 per_call_price: ec.pricing.as_ref().map_or(0.0, |p| p.per_call),

@@ -137,6 +137,12 @@ pub struct ScenarioConfig {
     /// every step (more diagnostics, more LLM cost on broken apps).
     #[serde(default)]
     pub continue_on_failure: bool,
+    /// Longest edge (px) of screenshots attached to `screenshot = true`
+    /// assert steps, before they are JPEG-encoded and sent to the vision
+    /// endpoint. Downscaling keeps vision token cost/quality sane.
+    /// Default: 1400.
+    #[serde(default)]
+    pub screenshot_max_dimension: Option<u32>,
     /// Directory for failure artifacts (screenshots, page snapshots).
     /// Defaults to `artifacts`.
     #[serde(default)]
@@ -174,6 +180,11 @@ pub struct EndpointConfig {
     /// Arguments for the MCP server command.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Whether this LLM endpoint accepts image parts (vision) in addition
+    /// to text. `assert` steps with `screenshot = true` require a vision
+    /// endpoint.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// Type discriminator for endpoint configuration.
@@ -471,6 +482,11 @@ pub enum TestStep {
         /// Endpoint to use for this assertion's LLM call.
         #[serde(default)]
         endpoint: Option<String>,
+        /// Attach a screenshot of the current viewport to the assertion so
+        /// the LLM can evaluate visuals (overlaps, clipping, layout).
+        /// Requires the resolved endpoint to declare `vision = true`.
+        #[serde(default)]
+        screenshot: bool,
     },
 
     /// Take a screenshot of the current page.

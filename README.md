@@ -145,6 +145,59 @@ timeout:
   page URL/title/content appended, so the LLM never answers "I can't
   determine that without seeing the page".
 
+## Vision assertions (screenshots)
+
+Text/DOM evaluation cannot see *how* the page renders — overlapping elements,
+clipped text, or a cookie banner covering the content are invisible to
+`innerText`. Mark an endpoint as vision-capable and attach a screenshot to an
+assert step to let the LLM evaluate the actual pixels:
+
+```toml
+[config]                      # optional: cap the screenshot resolution
+screenshot_max_dimension = 1400
+
+[config.endpoints.vision]     # MUST declare vision = true
+type = "llm"
+url = "https://api.openai.com"
+model = "gpt-4o"
+api_key = "sk-..."
+vision = true                 # ← the flag
+pricing = { input_per_1m_tokens = 2.50, output_per_1m_tokens = 10.00 }
+
+[[definitions]]
+name = "no_overlaps"
+preset = "visual_no_overlaps"
+
+[[test.steps]]
+kind = "assert"
+definition = "no_overlaps"
+endpoint = "vision"
+screenshot = true             # ← attach the viewport screenshot
+```
+
+How it works:
+
+- The viewport is captured as PNG, downscaled in Rust (Lanczos) so its
+  longest edge is at most `screenshot_max_dimension` (default 1400), and
+  re-encoded as quality-85 JPEG — no page JS, deterministic, and cheap on
+  vision tokens.
+- The image is sent as an OpenAI-compatible `image_url` content part next to
+  the text prompt (which still includes the page text for context).
+- Built-in presets: `visual_no_issues`, `visual_no_overlaps`,
+  `visual_text_visible` (uses `assert_text`). Custom `screenshot = true`
+  prompts work too.
+- A `screenshot = true` step that resolves to an endpoint without
+  `vision = true` fails immediately with a clear configuration error.
+- Text-only workflows are untouched: without `screenshot = true` the
+  request keeps the plain string `content` shape.
+
+See [`examples/visual-overlays.toml`](examples/visual-overlays.toml) + the
+bundled [`examples/visual-test-page.html`](examples/visual-test-page.html)
+fixture for a runnable demo that passes on a clean page and detects a cookie
+banner overlay. The prompts of the visual presets are intentionally strict
+("only fail on clearly visible, user-impacting defects") — tune them per app
+if your overlay detection needs to be more or less sensitive.
+
 ## Assertion presets
 
 Built-in presets you can use inline or from `[[definitions]]`.
@@ -154,6 +207,9 @@ Built-in presets you can use inline or from `[[definitions]]`.
 | `no_error_on_page` | No errors, stack traces, or broken UI on the page |
 | `text_visible` | Specific text appears on the page (`assert_text`) |
 | `element_exists` | A described UI element is present |
+| `visual_no_issues` | **Screenshot**: no layout/rendering defects (overlaps, clipping, cut-off content, broken images, blank panels) |
+| `visual_no_overlaps` | **Screenshot**: no elements covering other content or intercepting clicks |
+| `visual_text_visible` | **Screenshot**: `assert_text` is fully visible and readable (not clipped or covered) |
 
 Custom assertions with `prompt` send any question to the LLM:
 

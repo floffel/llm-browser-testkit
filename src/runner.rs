@@ -11,6 +11,7 @@ use crate::budgets::{BudgetStatus, BudgetTracker};
 use crate::costs::UsageTracker;
 use crate::diagnostics;
 use crate::endpoints::{EndpointRegistry, TaskType};
+use crate::llm_chat_vision_with_usage;
 use crate::llm_chat_with_usage;
 use crate::mcp_client::McpClient;
 use crate::scenario::{AssertDefinition, ScenarioConfig, TestGroup, TestStep};
@@ -105,6 +106,21 @@ const ASSERTION_PRESETS: &[AssertPreset] = &[
         name: "element_exists",
         system: "You are a QA tester. Check if a described UI element exists on a web page.",
         user_template: "Check if the following element exists on the page:\n\nELEMENT: \"{description}\"\n\nURL: {url}\n\nPage Content:\n{content}\n\nRespond with exactly \"PASS\" if the element exists, or \"FAIL: <reason>\" if it does not.",
+    },
+    AssertPreset {
+        name: "visual_no_issues",
+        system: "You are a visual QA engineer inspecting a website screenshot. Detect clearly visible layout and rendering defects: overlapping elements that hide content or controls, clipped or truncated text, content cut off at the viewport edges, misaligned or broken UI, blank/empty panels where content is expected, broken or missing images, duplicated elements, or rendering glitches. Ignore subjective aesthetics, intentional stacking (dropdowns, tooltips, layered design), and content that is simply not loaded (empty states). Only report defects that a user would actually see or be blocked by.",
+        user_template: "Inspect the attached screenshot and the page text below.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nAre there any clearly visible layout or rendering defects (overlaps, clipping, cut-off content, broken images, blank panels)? Respond with exactly \"PASS\" if the page renders cleanly, or \"FAIL: <describe each defect and where it appears>\" otherwise.",
+    },
+    AssertPreset {
+        name: "visual_no_overlaps",
+        system: "You are a visual QA engineer inspecting a website screenshot for OVERLAPPING elements that harm usability: one element covering another element's text, buttons, links, or input fields (cookie banners, modals, popovers, chat widgets, sticky headers, or mispositioned layers that hide content or intercept clicks). Ignore intentional, non-harmful stacking (dropdowns, tooltips, badges over avatars, layered design where nothing is hidden or unclickable). Only fail on overlaps that visibly hide content or would block a click.",
+        user_template: "Inspect the attached screenshot and the page text below.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nAre any elements overlapping in a way that hides page content, text, or interactive controls, or that would block clicks? Respond with exactly \"PASS\" if there are no such overlaps, or \"FAIL: <describe the overlapping elements and what they hide>\" otherwise.",
+    },
+    AssertPreset {
+        name: "visual_text_visible",
+        system: "You are a visual QA engineer inspecting a website screenshot. Determine whether a specific text is FULLY visible and readable: present in the viewport, not clipped, not cut off, not covered by another element, and not obscured by overlays or low contrast stacking. A partial word or a covered text counts as FAIL.",
+        user_template: "Inspect the attached screenshot and the page text below.\n\nTEXT TO CHECK: \"{expected_text}\"\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nIs the text fully visible and readable in the screenshot (not clipped, covered, or hidden)? Respond with exactly \"PASS\" if it is fully visible, or \"FAIL: <explain what hides or clips it>\" otherwise.",
     },
 ];
 
@@ -357,11 +373,13 @@ impl ScenarioRunner {
                     prompt,
                     assert_text,
                     endpoint,
+                    screenshot,
                 } => self.run_assert(
                     definition.as_deref(),
                     preset.as_deref(),
                     prompt.as_deref(),
                     assert_text.as_deref(),
+                    *screenshot,
                     endpoint.as_deref(),
                     test.endpoint.as_deref(),
                     tab,
@@ -708,6 +726,7 @@ impl ScenarioRunner {
         preset: Option<&str>,
         prompt: Option<&str>,
         assert_text: Option<&str>,
+        screenshot: bool,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
         tab: &Tab,
@@ -716,9 +735,50 @@ impl ScenarioRunner {
 
         let page_content = get_page_text(tab);
 
+        // Vision attach: capture the viewport once per assert step and hand
+        // the JPEG data URL to the preset/prompt evaluation below.
+        let image = if screenshot {
+            let endpoint = self
+                .endpoints
+                .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
+            if !endpoint.vision {
+                return StepResult {
+                    name: "[assert]".into(),
+                    status: StepStatus::Failed,
+                    message: format!(
+                        "screenshot requested but endpoint '{name}' does not declare vision = true (add vision = true to its [config.endpoints] entry)",
+                        name = endpoint.name
+                    ),
+                };
+            }
+            match crate::vision::capture_screenshot_data_url(
+                tab,
+                self.config
+                    .screenshot_max_dimension
+                    .unwrap_or(crate::vision::DEFAULT_MAX_DIMENSION),
+            ) {
+                Ok(data_url) => Some(data_url),
+                Err(e) => {
+                    return StepResult {
+                        name: "[assert]".into(),
+                        status: StepStatus::Failed,
+                        message: format!("screenshot capture failed: {e}"),
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
         if let Some(def_name) = definition {
             if let Some(def) = self.definitions.get(def_name) {
-                return self.run_assert_def(def, &page_content, step_endpoint, test_endpoint);
+                return self.run_assert_def(
+                    def,
+                    &page_content,
+                    image.as_deref(),
+                    step_endpoint,
+                    test_endpoint,
+                );
             }
             return StepResult {
                 name: format!("[assert] {def_name}"),
@@ -732,13 +792,20 @@ impl ScenarioRunner {
                 preset_name,
                 assert_text,
                 &page_content,
+                image.as_deref(),
                 step_endpoint,
                 test_endpoint,
             );
         }
 
         if let Some(prompt_text) = prompt {
-            return self.run_custom(prompt_text, &page_content, step_endpoint, test_endpoint);
+            return self.run_custom(
+                prompt_text,
+                &page_content,
+                image.as_deref(),
+                step_endpoint,
+                test_endpoint,
+            );
         }
 
         StepResult {
@@ -752,11 +819,19 @@ impl ScenarioRunner {
         &self,
         def: &AssertDefinition,
         page_content: &PageContent,
+        image: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
         // Agent-based definition: delegate to an A2A agent
         if let Some(ref agent) = def.agent {
+            if image.is_some() {
+                return StepResult {
+                    name: format!("[assert] {}", def.name),
+                    status: StepStatus::Failed,
+                    message: "agent-backed assertions do not support screenshots".into(),
+                };
+            }
             let task = def
                 .task_template
                 .as_deref()
@@ -777,6 +852,7 @@ impl ScenarioRunner {
                 template,
                 def.assert_text.as_deref(),
                 page_content,
+                image,
                 step_endpoint,
                 test_endpoint,
             );
@@ -790,7 +866,9 @@ impl ScenarioRunner {
                         status: StepStatus::Failed,
                         message: "definition has no preset, prompt, or system+user_template".into(),
                     },
-                    |prompt| self.run_custom(prompt, page_content, step_endpoint, test_endpoint),
+                    |prompt| {
+                        self.run_custom(prompt, page_content, image, step_endpoint, test_endpoint)
+                    },
                 )
             },
             |preset_name| {
@@ -798,6 +876,7 @@ impl ScenarioRunner {
                     preset_name,
                     def.assert_text.as_deref(),
                     page_content,
+                    image,
                     step_endpoint,
                     test_endpoint,
                 )
@@ -813,6 +892,7 @@ impl ScenarioRunner {
         template: &str,
         assert_text: Option<&str>,
         page_content: &PageContent,
+        image: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
@@ -847,13 +927,20 @@ impl ScenarioRunner {
         let usage = Arc::clone(&self.usage);
         let endpoint_name = endpoint.name.clone();
         let sys = system.to_owned();
+        let image = image.map(str::to_owned);
 
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat_with_usage(&llm, &sys, &user_prompt))
+            let call = async {
+                match image.as_deref() {
+                    Some(img) => llm_chat_vision_with_usage(&llm, &sys, &user_prompt, img).await,
+                    None => llm_chat_with_usage(&llm, &sys, &user_prompt).await,
+                }
+            };
+            rt.block_on(call)
         })
         .join()
         .unwrap();
@@ -894,6 +981,7 @@ impl ScenarioRunner {
         preset_name: &str,
         assert_text: Option<&str>,
         page_content: &PageContent,
+        image: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
@@ -904,6 +992,15 @@ impl ScenarioRunner {
                 message: format!("unknown assertion preset: {preset_name}"),
             };
         };
+        if preset_name.starts_with("visual_") && image.is_none() {
+            return StepResult {
+                name: format!("[assert] {preset_name}"),
+                status: StepStatus::Failed,
+                message: format!(
+                    "preset '{preset_name}' evaluates the page screenshot — set screenshot = true on the assert step and point it at a vision endpoint (vision = true)"
+                ),
+            };
+        }
 
         let user_prompt = preset
             .user_template
@@ -935,13 +1032,20 @@ impl ScenarioRunner {
         let usage = Arc::clone(&self.usage);
         let endpoint_name = endpoint.name.clone();
         let sys = preset.system.to_owned();
+        let image = image.map(str::to_owned);
 
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat_with_usage(&llm, &sys, &user_prompt))
+            let call = async {
+                match image.as_deref() {
+                    Some(img) => llm_chat_vision_with_usage(&llm, &sys, &user_prompt, img).await,
+                    None => llm_chat_with_usage(&llm, &sys, &user_prompt).await,
+                }
+            };
+            rt.block_on(call)
         })
         .join()
         .unwrap();
@@ -981,17 +1085,23 @@ impl ScenarioRunner {
         &self,
         prompt: &str,
         page_content: &PageContent,
+        image: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
         let system = "You are a QA tester evaluating a web page. Respond with exactly \"PASS\" if the assertion holds, or \"FAIL: <reason>\" if it does not.";
 
-        let user = format!(
+        let mut user = format!(
             "Page URL: {url}\nPage Title: {title}\n\nPage Content:\n{content}\n\nAssertion: {prompt}",
             url = page_content.url,
             title = page_content.title,
             content = page_content.body_text,
         );
+        if image.is_some() {
+            user.push_str(
+                "\n\nA screenshot of the page is attached — inspect it for visual evidence when answering.",
+            );
+        }
 
         eprintln!("      custom assert");
 
@@ -1002,13 +1112,20 @@ impl ScenarioRunner {
         let usage = Arc::clone(&self.usage);
         let endpoint_name = endpoint.name.clone();
         let sys = system.to_owned();
+        let image = image.map(str::to_owned);
 
         let response = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(llm_chat_with_usage(&llm, &sys, &user))
+            let call = async {
+                match image.as_deref() {
+                    Some(img) => llm_chat_vision_with_usage(&llm, &sys, &user, img).await,
+                    None => llm_chat_with_usage(&llm, &sys, &user).await,
+                }
+            };
+            rt.block_on(call)
         })
         .join()
         .unwrap();

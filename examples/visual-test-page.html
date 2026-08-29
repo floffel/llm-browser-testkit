@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Vision test fixture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #fafafa; }
+    header { background: #1b3a5c; color: #fff; padding: 1rem 2rem; }
+    header nav a { color: #fff; margin-right: 1rem; }
+    main { padding: 2rem; max-width: 720px; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .btn { background: #1976d2; color: #fff; border: 0; border-radius: 6px; padding: .6rem 1.2rem; cursor: pointer; }
+    .btn.dismiss { background: #555; }
+    #cookie-banner {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: #333; color: #fff; padding: 1rem 2rem;
+      display: flex; gap: 1rem; align-items: center; z-index: 50;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Fixture Corp</h1>
+    <nav><a href="#">Home</a><a href="#">Pricing</a><a href="#">Sign in</a></nav>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Welcome</h2>
+      <p>This fixture page exists so the <code>visual-overlays.toml</code> example
+      scenario can be run against a known page. By default everything renders
+      cleanly (the assertions PASS). Open <code>?overlay=1</code> to show a
+      fixed cookie banner that covers the page footer — the
+      <code>visual_no_overlaps</code> assertion then FAILs with a description
+      of the overlap.</p>
+      <button class="btn" id="signin">Sign in</button>
+    </section>
+    <section class="card">
+      <h2>Recent activity</h2>
+      <p>No activity yet.</p>
+    </section>
+    <footer id="footer">© 2026 Fixture Corp — Imprint · Privacy</footer>
+  </main>
+  <div id="cookie-banner" hidden>
+    <span>We use cookies to improve your experience.</span>
+    <button class="btn dismiss" id="dismiss">Accept</button>
+  </div>
+  <script>
+    if (new URLSearchParams(location.search).has('overlay')) {
+      document.getElementById('cookie-banner').hidden = false;
+    }
+    document.getElementById('dismiss')?.addEventListener('click', () => {
+      document.getElementById('cookie-banner').hidden = true;
+    });
+  </script>
+</body>
+</html>

@@ -38,6 +38,8 @@ pub mod runner;
 pub mod scenario;
 /// CSS selector sanitization for LLM-generated selectors.
 pub mod selectors;
+/// Vision support — screenshot capture/downscale/encode for visual asserts.
+pub mod vision;
 
 /// A2A agent server for accepting agent tasks.
 #[cfg(feature = "a2a-server")]
@@ -50,7 +52,7 @@ pub mod macros;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub use costs::LlmResponse;
 pub use costs::LlmUsage;
@@ -191,13 +193,43 @@ pub async fn llm_chat_with_usage(
     system: &str,
     user: &str,
 ) -> Result<LlmResponse, String> {
+    chat_with_retry(llm, system, user, None).await
+}
+
+/// Sends a vision-enabled chat completion request: the user message carries
+/// both the text prompt and a screenshot (JPEG/PNG data URL) as an
+/// OpenAI-compatible `image_url` content part.
+///
+/// Retries and error reporting behave like [`llm_chat_with_usage`].
+///
+/// # Errors
+///
+/// Returns the last underlying error as a human-readable string when every
+/// attempt fails (transport error, non-success HTTP status, response that is
+/// not valid JSON, or a response missing `choices[0].message.content`).
+pub async fn llm_chat_vision_with_usage(
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+    image_data_url: &str,
+) -> Result<LlmResponse, String> {
+    chat_with_retry(llm, system, user, Some(image_data_url)).await
+}
+
+/// Shared retry loop for text-only and vision chat completions.
+async fn chat_with_retry(
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+    image_data_url: Option<&str>,
+) -> Result<LlmResponse, String> {
     let client = http_client(llm.timeout);
     let mut last_err = String::from("LLM call failed");
     let mut attempts: u32 = 0;
 
     while attempts < LLM_CALL_ATTEMPTS {
         attempts += 1;
-        match llm_chat_once(&client, llm, system, user).await {
+        match llm_chat_once(&client, llm, system, user, image_data_url).await {
             Ok(resp) => return Ok(resp),
             Err(err) => {
                 last_err = err.to_string();
@@ -217,6 +249,26 @@ pub async fn llm_chat_with_usage(
 
 /// Number of attempts for a single chat completion call.
 const LLM_CALL_ATTEMPTS: u32 = 3;
+
+/// Builds the chat messages array. Text-only messages keep the plain
+/// string `content` shape (maximum provider compatibility); vision calls
+/// use the OpenAI-compatible content-part array with a `data:` image URL.
+#[must_use]
+fn build_messages(system: &str, user: &str, image_data_url: Option<&str>) -> Value {
+    let user_content = image_data_url.map_or_else(
+        || Value::String(user.to_owned()),
+        |url| {
+            json!([
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": url}}
+            ])
+        },
+    );
+    json!([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content}
+    ])
+}
 
 /// Internal error type for a single LLM request attempt, distinguishing
 /// transient failures (worth retrying) from deterministic configuration
@@ -289,13 +341,11 @@ async fn llm_chat_once(
     llm: &LlmConfig,
     system: &str,
     user: &str,
+    image_data_url: Option<&str>,
 ) -> Result<LlmResponse, LlmCallError> {
     let mut payload = serde_json::json!({
         "model": llm.model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ],
+        "messages": build_messages(system, user, image_data_url),
         "max_tokens": 4096,
         "temperature": llm.temperature
     });

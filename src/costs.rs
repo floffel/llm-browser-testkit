@@ -260,6 +260,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             command: None,
             args: vec![],
+            vision: false,
             input_price_per_1m: input_price,
             output_price_per_1m: output_price,
             per_call_price: per_call,

@@ -1,0 +1,71 @@
+# Visual (vision-model) assertions — overlapping elements, clipping, layout.
+#
+# Requires a vision-capable LLM endpoint (the `vision` endpoint below must
+# point at a model that accepts images, e.g. gpt-4o / claude-sonnet). The
+# same text-only workflow keeps working when `screenshot = true` is absent.
+#
+# Serve the fixture page first:
+#
+#   python3 -m http.server 8000 --directory examples
+#
+# Then run (with a real vision model URL/key):
+#
+#   llm-browser-testkit run examples/visual-overlays.toml \
+#     --llm-url <vision-endpoint> --llm-model <vision-model> \
+#     --base-url http://127.0.0.1:8000
+
+[config]
+base_url = "http://127.0.0.1:8000"
+start_url = "/visual-test-page.html"
+timeout_secs = 60
+# Screenshots are downscaled to a longest edge of 1400 px before being sent
+# (keeps vision token cost and quality sane).
+screenshot_max_dimension = 1400
+
+[config.budgets.per_test_default]
+max_cost = 1.50
+max_tokens = 200_000
+enforcement = "soft"
+
+# The vision endpoint declares `vision = true`. Steps that inspect a
+# screenshot resolve here via `endpoint = "vision"`.
+[config.endpoints.vision]
+type = "llm"
+url = "http://localhost:8080"
+model = "gpt-4o"
+api_key = ""
+vision = true
+pricing = { input_per_1m_tokens = 2.50, output_per_1m_tokens = 10.00 }
+default_for = []
+
+# ── Tests ──
+
+[[test]]
+name = "Clean page has no visual defects"
+steps = [
+    { kind = "navigate", url = "/visual-test-page.html", wait_after_ms = 500 },
+    { kind = "wait", target = "the page header", selector = "header", timeout_ms = 8000 },
+    { kind = "assert", preset = "visual_no_issues", endpoint = "vision", screenshot = true },
+    { kind = "assert", preset = "visual_no_overlaps", endpoint = "vision", screenshot = true },
+    { kind = "assert", preset = "visual_text_visible", assert_text = "Sign in", endpoint = "vision", screenshot = true },
+]
+
+[[test]]
+name = "Cookie banner overlay is detected"
+steps = [
+    { kind = "navigate", url = "/visual-test-page.html?overlay=1", wait_after_ms = 500 },
+    { kind = "wait", target = "the cookie banner", selector = "#cookie-banner", timeout_ms = 8000 },
+    # Expected to FAIL: the fixed banner covers the footer. This is the
+    # didactic half of the example — a real suite should click the banner's
+    # Accept button and re-assert (see the next test).
+    { kind = "assert", preset = "visual_no_overlaps", endpoint = "vision", screenshot = true },
+]
+
+[[test]]
+name = "Dismissing the overlay restores a clean page"
+steps = [
+    { kind = "navigate", url = "/visual-test-page.html?overlay=1", wait_after_ms = 500 },
+    { kind = "wait", target = "the cookie banner", selector = "#cookie-banner", timeout_ms = 8000 },
+    { kind = "click", target = "the accept button", selector = "#dismiss", wait_after_ms = 400 },
+    { kind = "assert", preset = "visual_no_overlaps", endpoint = "vision", screenshot = true },
+]
