@@ -117,10 +117,10 @@ timeout:
 ```
 ❌ [wait] the authenticated shell — wait for app-account-shell timed out after
 30000ms: The event waited for never came — page: http://127.0.0.1:8082/auth/login
-(Immosai) — visible: "E-Mail-Adresse ⏎ Passwort ⏎ Anmelden"
+(Immosai) — visible: "Email address ⏎ Password ⏎ Sign in"
     │ url:      http://127.0.0.1:8082/auth/login
     │ title:    Immosai — Anmeldung
-    │ content:  E-Mail-Adresse  Passwort  ...  Die eingegebenen Zugangsdaten sind ungültig.
+    │ content:  Email address  Password  ...  Invalid credentials.
     📸 screenshot: artifacts/account__login-and-open-account__006-wait.png
 ```
 

@@ -192,11 +192,11 @@ mod tests {
     fn state() -> PageState {
         PageState {
             url: "http://127.0.0.1:8082/auth/login".into(),
-            title: "Immosai — Anmeldung".into(),
+            title: "Immosai — Sign in".into(),
             visible_text:
-                "E-Mail-Adresse\nPasswort\nAnmelden\nDie eingegebenen Zugangsdaten sind ungültig."
+                "Email address\nPassword\nSign in\nInvalid credentials."
                     .into(),
-            alerts: vec!["Die eingegebenen Zugangsdaten sind ungültig.".into()],
+            alerts: vec!["Invalid credentials.".into()],
         }
     }
 
