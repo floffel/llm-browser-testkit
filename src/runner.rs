@@ -448,28 +448,18 @@ impl ScenarioRunner {
                     let full_url = resolve_url(url, &base_url);
                     run_navigate_step(&full_url, tab)
                 }
-                TestStep::Login {
-                    url,
-                    email,
-                    password,
-                    wait_after_ms,
-                } => run_login_step(
-                    &resolve_url(url, &base_url),
-                    email,
-                    password,
-                    *wait_after_ms,
-                    tab,
-                ),
                 TestStep::Click {
                     target,
                     selector,
                     endpoint,
+                    idempotent,
                     ..
                 } => self.run_click(
                     target,
                     selector.as_deref(),
                     endpoint.as_deref(),
                     test.endpoint.as_deref(),
+                    *idempotent,
                     tab,
                 ),
                 TestStep::Type {
@@ -477,6 +467,7 @@ impl ScenarioRunner {
                     text,
                     selector,
                     endpoint,
+                    idempotent,
                     ..
                 } => self.run_type(
                     target,
@@ -484,6 +475,7 @@ impl ScenarioRunner {
                     selector.as_deref(),
                     endpoint.as_deref(),
                     test.endpoint.as_deref(),
+                    *idempotent,
                     tab,
                 ),
                 TestStep::Wait {
@@ -492,6 +484,7 @@ impl ScenarioRunner {
                     text,
                     timeout_ms,
                     endpoint,
+                    idempotent,
                 } => self.run_wait(
                     target,
                     selector.as_deref(),
@@ -499,6 +492,7 @@ impl ScenarioRunner {
                     *timeout_ms,
                     endpoint.as_deref(),
                     test.endpoint.as_deref(),
+                    *idempotent,
                     tab,
                 ),
                 TestStep::Assert {
@@ -666,14 +660,17 @@ impl ScenarioRunner {
 
     // ── step handlers ───────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_lines)]
     fn run_click(
         &self,
         target: &str,
         selector_override: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
+        idempotent: bool,
         tab: &Tab,
     ) -> StepResult {
+        let name = format!("[click] {target}");
         let selector = match self.resolve_selector(
             selector_override,
             target,
@@ -683,29 +680,46 @@ impl ScenarioRunner {
         ) {
             Ok(s) => s,
             Err(msg) => {
+                if idempotent {
+                    return StepResult {
+                        name,
+                        status: StepStatus::Skipped,
+                        message: format!("skipped (idempotent): no target found — {msg}"),
+                    };
+                }
                 return StepResult {
-                    name: format!("[click] {target}"),
+                    name,
                     status: StepStatus::Failed,
                     message: msg,
                 };
             }
         };
 
-        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(10)) {
+        // Idempotent steps probe briefly: a missing target means the
+        // action was already done / not applicable (e.g. an
+        // already-authenticated session), and skipping is the success
+        // path, not a failure.
+        let probe_secs = if idempotent { 5 } else { 10 };
+        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(probe_secs)) {
             Ok(element) => match element.click() {
                 Ok(_) => StepResult {
-                    name: format!("[click] {target}"),
+                    name,
                     status: StepStatus::Passed,
                     message: format!("clicked {selector}"),
                 },
                 Err(e) => StepResult {
-                    name: format!("[click] {target}"),
+                    name,
                     status: StepStatus::Failed,
                     message: format!("click failed on {selector}: {e}"),
                 },
             },
+            Err(e) if idempotent => StepResult {
+                name,
+                status: StepStatus::Skipped,
+                message: format!("skipped (idempotent): element {selector} not present — {e}"),
+            },
             Err(e) => StepResult {
-                name: format!("[click] {target}"),
+                name,
                 status: StepStatus::Failed,
                 message: format!("element {selector} not found: {e}"),
             },
@@ -720,8 +734,10 @@ impl ScenarioRunner {
         selector_override: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
+        idempotent: bool,
         tab: &Tab,
     ) -> StepResult {
+        let name = format!("[type] {target}");
         let selector = match self.resolve_selector(
             selector_override,
             target,
@@ -731,19 +747,27 @@ impl ScenarioRunner {
         ) {
             Ok(s) => s,
             Err(msg) => {
+                if idempotent {
+                    return StepResult {
+                        name,
+                        status: StepStatus::Skipped,
+                        message: format!("skipped (idempotent): no target found — {msg}"),
+                    };
+                }
                 return StepResult {
-                    name: format!("[type] {target}"),
+                    name,
                     status: StepStatus::Failed,
                     message: msg,
                 };
             }
         };
 
-        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(10)) {
+        let probe_secs = if idempotent { 5 } else { 10 };
+        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(probe_secs)) {
             Ok(element) => {
                 if let Err(e) = element.click() {
                     return StepResult {
-                        name: format!("[type] {target}"),
+                        name,
                         status: StepStatus::Failed,
                         message: format!("click to focus {selector} failed: {e}"),
                     };
@@ -757,19 +781,24 @@ impl ScenarioRunner {
 
                 match element.type_into(text) {
                     Ok(_) => StepResult {
-                        name: format!("[type] {target}"),
+                        name,
                         status: StepStatus::Passed,
                         message: format!("typed {text:?} into {selector}"),
                     },
                     Err(e) => StepResult {
-                        name: format!("[type] {target}"),
+                        name,
                         status: StepStatus::Failed,
                         message: format!("type into {selector} failed: {e}"),
                     },
                 }
             }
+            Err(e) if idempotent => StepResult {
+                name,
+                status: StepStatus::Skipped,
+                message: format!("skipped (idempotent): element {selector} not present — {e}"),
+            },
             Err(e) => StepResult {
-                name: format!("[type] {target}"),
+                name,
                 status: StepStatus::Failed,
                 message: format!("element {selector} not found: {e}"),
             },
@@ -777,6 +806,7 @@ impl ScenarioRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     fn run_wait(
         &self,
         target: &str,
@@ -785,6 +815,7 @@ impl ScenarioRunner {
         timeout_ms: Option<u64>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
+        idempotent: bool,
         tab: &Tab,
     ) -> StepResult {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(10_000));
@@ -797,6 +828,13 @@ impl ScenarioRunner {
             None => match self.resolve_selector(None, target, step_endpoint, test_endpoint, tab) {
                 Ok(s) => Some(s),
                 Err(msg) => {
+                    if idempotent {
+                        return StepResult {
+                            name: step_name,
+                            status: StepStatus::Skipped,
+                            message: format!("skipped (idempotent): no target found — {msg}"),
+                        };
+                    }
                     return StepResult {
                         name: step_name,
                         status: StepStatus::Failed,
@@ -845,14 +883,22 @@ impl ScenarioRunner {
                     if let Some(t) = text {
                         what.push(format!("text {t:?}"));
                     }
+                    let message = format!(
+                        "wait for {} timed out after {}ms: the event waited for never came",
+                        what.join(" / "),
+                        timeout.as_millis(),
+                    );
+                    if idempotent {
+                        return StepResult {
+                            name: step_name,
+                            status: StepStatus::Skipped,
+                            message: format!("skipped (idempotent): {message}"),
+                        };
+                    }
                     return StepResult {
                         name: step_name,
                         status: StepStatus::Failed,
-                        message: format!(
-                            "wait for {} timed out after {}ms: the event waited for never came",
-                            what.join(" / "),
-                            timeout.as_millis(),
-                        ),
+                        message,
                     };
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -865,6 +911,14 @@ impl ScenarioRunner {
                     name: step_name,
                     status: StepStatus::Passed,
                     message: format!("found {sel}"),
+                },
+                Err(e) if idempotent => StepResult {
+                    name: step_name,
+                    status: StepStatus::Skipped,
+                    message: format!(
+                        "skipped (idempotent): wait for {sel} timed out after {}ms: {e}",
+                        timeout.as_millis()
+                    ),
                 },
                 Err(e) => StepResult {
                     name: step_name,
@@ -1807,128 +1861,6 @@ fn run_navigate_step(full_url: &str, tab: &Tab) -> StepResult {
     }
 }
 
-/// Idempotent login step: navigate to the login URL and, if a login
-/// form is rendered, fill it, wait for the bot-protection token,
-/// submit, and wait for the authenticated shell. When the app is
-/// already authenticated the login form never appears and the step
-/// passes silently — this keeps viewport-matrix variants and repeated
-/// logins in one browser session green.
-fn run_login_step(
-    full_url: &str,
-    email: &str,
-    password: &str,
-    wait_after_ms: Option<u64>,
-    tab: &Tab,
-) -> StepResult {
-    let name = format!("[login] {full_url}");
-    match tab.navigate_to(full_url) {
-        Ok(_) => {
-            let _ = tab.wait_until_navigated();
-            std::thread::sleep(Duration::from_millis(3000));
-        }
-        Err(e) => {
-            return StepResult {
-                name,
-                status: StepStatus::Failed,
-                message: format!("navigation failed: {e}"),
-            };
-        }
-    }
-
-    let form_present = eval_bool(tab, "document.querySelector('#email') !== null").unwrap_or(false);
-    if !form_present {
-        return StepResult {
-            name,
-            status: StepStatus::Passed,
-            message: "already authenticated (no login form rendered)".into(),
-        };
-    }
-
-    for (selector, text) in [("#email", email), ("#password", password)] {
-        match tab.wait_for_element_with_custom_timeout(selector, Duration::from_secs(5)) {
-            Ok(element) => {
-                let _ = element.click();
-                let js = format!("document.querySelector('{selector}').value = '';");
-                let _ = tab.evaluate(&js, false);
-                if let Err(e) = element.type_into(text) {
-                    return StepResult {
-                        name,
-                        status: StepStatus::Failed,
-                        message: format!("typing into {selector} failed: {e}"),
-                    };
-                }
-            }
-            Err(e) => {
-                return StepResult {
-                    name,
-                    status: StepStatus::Failed,
-                    message: format!("login input {selector} not found: {e}"),
-                };
-            }
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-
-    // Bot-protection / Turnstile token. The dev estate uses the
-    // Turnstile test-mode widget; wait for the hidden field value.
-    let token_ok = (0..20).any(|_| {
-        std::thread::sleep(Duration::from_millis(1500));
-        eval_bool(
-            tab,
-            "document.querySelector('input[name=\"cf-turnstile-response\"][value]:not([value=\"\"])') !== null",
-        )
-        .unwrap_or(false)
-    });
-    if !token_ok {
-        return StepResult {
-            name,
-            status: StepStatus::Failed,
-            message: "bot-protection token never appeared (is the Turnstile widget in test mode?)"
-                .into(),
-        };
-    }
-
-    let sign_in_ok = match tab.wait_for_element_with_custom_timeout(
-        "button.btn--landing.btn--primary",
-        Duration::from_secs(5),
-    ) {
-        Ok(element) => element.click().is_ok(),
-        Err(_) => false,
-    };
-    if !sign_in_ok {
-        return StepResult {
-            name,
-            status: StepStatus::Failed,
-            message: "sign-in button not found or not clickable".into(),
-        };
-    }
-
-    // Wait for the authenticated shell.
-    let authed = (0..20).any(|_| {
-        std::thread::sleep(Duration::from_millis(1500));
-        eval_bool(tab, "document.querySelector('app-account-shell') !== null").unwrap_or(false)
-    });
-    if !authed {
-        return StepResult {
-            name,
-            status: StepStatus::Failed,
-            message:
-                "login submitted but the authenticated shell never appeared (bad credentials?)"
-                    .into(),
-        };
-    }
-
-    if let Some(ms) = wait_after_ms {
-        std::thread::sleep(Duration::from_millis(ms));
-    }
-
-    StepResult {
-        name,
-        status: StepStatus::Passed,
-        message: "authenticated".into(),
-    }
-}
-
 fn extract_dom_info(tab: &Tab) -> Result<String, String> {
     let result = tab
         .evaluate(DOM_EXTRACT_JS, false)
@@ -1993,7 +1925,6 @@ fn resolve_url(url: &str, base_url: &str) -> String {
 fn step_label(step: &TestStep) -> String {
     match step {
         TestStep::Navigate { url, .. } => format!("[navigate] {url}"),
-        TestStep::Login { url, .. } => format!("[login] {url}"),
         TestStep::Click { target, .. } => format!("[click] {target}"),
         TestStep::Type { target, .. } => format!("[type] {target}"),
         TestStep::Wait { target, .. } => format!("[wait] {target}"),
@@ -2027,7 +1958,6 @@ fn step_label(step: &TestStep) -> String {
 const fn step_kind_label(step: &TestStep) -> &'static str {
     match step {
         TestStep::Navigate { .. } => "navigate",
-        TestStep::Login { .. } => "login",
         TestStep::Click { .. } => "click",
         TestStep::Type { .. } => "type",
         TestStep::Wait { .. } => "wait",

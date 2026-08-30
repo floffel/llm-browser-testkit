@@ -413,29 +413,41 @@ steps = []
 }
 
 #[test]
-fn test_login_step_parses() {
-    let toml = r#"
+fn test_idempotent_steps_parse() {
+    use llm_browser_testkit::scenario::TestStep;
+    let toml = r##"
 [[test]]
-name = "login"
+name = "flow"
 steps = [
-    { kind = "login", url = "/auth/login", email = "admin@example.com", password = "secret" },
-    { kind = "navigate", url = "/app/dashboard" },
+    { kind = "click", target = "the save button", idempotent = true },
+    { kind = "type", target = "the email input", selector = "#email", text = "a@b.c", idempotent = true },
+    { kind = "wait", target = "the shell", selector = "app-shell", timeout_ms = 5000, idempotent = true },
+    { kind = "click", target = "the other button" },
 ]
-"#;
-    let scenario: Scenario = toml::from_str(toml).expect("parse login step");
+"##;
+    let scenario: Scenario = toml::from_str(toml).expect("parse idempotent steps");
     let steps = &scenario.test[0].steps;
-    assert_eq!(steps.len(), 2);
     match &steps[0] {
-        llm_browser_testkit::scenario::TestStep::Login {
-            url,
-            email,
-            password,
+        TestStep::Click { idempotent, .. } => assert!(*idempotent),
+        other => panic!("expected Click, got {other:?}"),
+    }
+    match &steps[1] {
+        TestStep::Type { idempotent, .. } => assert!(*idempotent),
+        other => panic!("expected Type, got {other:?}"),
+    }
+    match &steps[2] {
+        TestStep::Wait {
+            idempotent,
+            timeout_ms,
             ..
         } => {
-            assert_eq!(url, "/auth/login");
-            assert_eq!(email, "admin@example.com");
-            assert_eq!(password, "secret");
+            assert!(*idempotent);
+            assert_eq!(*timeout_ms, Some(5000));
         }
-        other => panic!("expected Login step, got {other:?}"),
+        other => panic!("expected Wait, got {other:?}"),
+    }
+    match &steps[3] {
+        TestStep::Click { idempotent, .. } => assert!(!*idempotent),
+        other => panic!("expected non-idempotent Click, got {other:?}"),
     }
 }

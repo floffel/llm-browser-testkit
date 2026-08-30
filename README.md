@@ -79,10 +79,9 @@ Every step has a `kind`. Required fields depend on the kind.
 | `kind` | What it does | Required | Optional |
 |--------|-------------|----------|----------|
 | `navigate` | Open a URL | `url` | `wait_after_ms` |
-| `login` | Idempotent login: fills the form if present, passes silently when already authenticated | `email`, `password` | `url` (default `/auth/login`), `wait_after_ms` |
-| `click` | Click an element | `target` | `selector`, `wait_after_ms`, `endpoint` |
-| `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms`, `endpoint` |
-| `wait` | Wait for an element and/or visible text | `target` | `selector`, `text`, `timeout_ms`, `endpoint` |
+| `click` | Click an element | `target` | `selector`, `wait_after_ms`, `endpoint`, `idempotent` |
+| `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms`, `endpoint`, `idempotent` |
+| `wait` | Wait for an element and/or visible text | `target` | `selector`, `text`, `timeout_ms`, `endpoint`, `idempotent` |
 | `assert` | Check the page | one of `definition`, `preset`, or `prompt` | `assert_text`, `endpoint` |
 | `screenshot` | Save a .png | — | `path` |
 | `agent` | Call an A2A agent | `agent`, `task` | `definition` |
@@ -92,23 +91,62 @@ Every step has a `kind`. Required fields depend on the kind.
 LLM looks at the page DOM and picks the right CSS selector at runtime. Skip the
 LLM with an explicit `selector`.
 
-**`login`** — navigate to the login page and authenticate. If the app is
-already signed in (no login form rendered), the step passes silently, so
-scenarios that run the same test across a viewport matrix — or repeat login
-steps in one browser session — stay green:
+**`idempotent`** — an optional flag on `click`, `type` and `wait` steps.
+When the step's target is absent, the step is reported **skipped** instead
+of failed: the action was already done or not applicable. This is the
+generic building block for flows that repeat in one browser session —
+e.g. logging in on every viewport-matrix variant of the same test:
 
 ```toml
 [[test.steps]]
-kind = "login"
+kind = "navigate"
 url = "/auth/login"
-email = "admin@example.com"
-password = "correct horse battery staple"
+
+# Already authenticated? The form is gone, so these steps skip
+# instead of failing.
+[[test.steps]]
+kind = "type"
+selector = "#email"
+target = "the email input"
+text = "admin@example.com"
+idempotent = true
+
+[[test.steps]]
+kind = "type"
+selector = "#password"
+target = "the password input"
+text = "correct horse battery staple"
+idempotent = true
+
+[[test.steps]]
+kind = "wait"
+selector = "input[name="cf-turnstile-response"][value]:not([value=""])"
+target = "the bot-protection token"
+timeout_ms = 15000
+idempotent = true
+
+[[test.steps]]
+kind = "click"
+selector = "button.btn--landing.btn--primary"
+target = "the sign-in button"
+idempotent = true
+
+# The final check stays strict: a real login attempt that never
+# reaches the authenticated shell still fails the test.
+[[test.steps]]
+kind = "wait"
+selector = "app-account-shell"
+target = "the authenticated shell"
+timeout_ms = 30000
 ```
 
-The step types into `#email` / `#password`, waits for a bot-protection token
-(`input[name="cf-turnstile-response"][value]:not([value=""])`, up to 30s),
-clicks `button.btn--landing.btn--primary` and waits for the authenticated
-shell (`app-account-shell`, up to 30s).
+Semantics:
+- `idempotent` `click` / `type`: probe for up to 5s; absent target → skipped.
+- `idempotent` `wait`: run the wait as normal; a timeout → skipped instead
+  of failed.
+- Skipped steps do **not** fail the test and do **not** trigger fail-fast.
+- Keep the final verification step strict (no `idempotent`) so real
+  failures in the middle of an idempotent flow still surface.
 
 **`endpoint`** routes this step to a specific [endpoint](#endpoints). Use it to
 send element targeting to one model and assertions to another.

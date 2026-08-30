@@ -329,10 +329,6 @@ const fn default_auto_navigate() -> bool {
     true
 }
 
-fn default_login_url() -> String {
-    "/auth/login".to_owned()
-}
-
 const fn default_temperature() -> f64 {
     0.0
 }
@@ -445,26 +441,6 @@ pub enum TestStep {
         wait_after_ms: Option<u64>,
     },
 
-    /// Idempotent login: navigate to the login URL; if the app is
-    /// already authenticated (no login form rendered), pass silently.
-    /// Otherwise fill the form, wait for the bot-protection token,
-    /// submit, and wait for the authenticated shell. Built for
-    /// scenarios that repeat login steps across viewport-matrix
-    /// variants in one browser session.
-    #[serde(rename = "login")]
-    Login {
-        /// Login page URL (relative to the base URL).
-        #[serde(default = "default_login_url")]
-        url: String,
-        /// Email / username to enter.
-        email: String,
-        /// Password to enter.
-        password: String,
-        /// Milliseconds to wait after the authenticated shell appears.
-        #[serde(default)]
-        wait_after_ms: Option<u64>,
-    },
-
     /// Click an element described in natural language.
     #[serde(rename = "click")]
     Click {
@@ -480,6 +456,11 @@ pub enum TestStep {
         /// Endpoint to use for LLM element targeting.
         #[serde(default)]
         endpoint: Option<String>,
+        /// Idempotent: when the target element is absent the step is
+        /// reported skipped instead of failed (the action was already
+        /// done / not applicable).
+        #[serde(default)]
+        idempotent: bool,
     },
 
     /// Type text into an input element.
@@ -498,6 +479,11 @@ pub enum TestStep {
         /// Endpoint to use for LLM element targeting.
         #[serde(default)]
         endpoint: Option<String>,
+        /// Idempotent: when the target element is absent the step is
+        /// reported skipped instead of failed (the action was already
+        /// done / not applicable).
+        #[serde(default)]
+        idempotent: bool,
     },
 
     /// Wait for an element to appear on the page.
@@ -519,6 +505,12 @@ pub enum TestStep {
         /// Endpoint to use for LLM element targeting.
         #[serde(default)]
         endpoint: Option<String>,
+        /// Idempotent: when the condition never becomes true within the
+        /// timeout the step is reported skipped instead of failed (the
+        /// condition was not applicable, e.g. already-authenticated
+        /// pages in a viewport matrix).
+        #[serde(default)]
+        idempotent: bool,
     },
 
     /// Evaluate an assertion against the current page content.
