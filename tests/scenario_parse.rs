@@ -411,3 +411,31 @@ steps = []
     assert_eq!(default_vp.viewport_width, None);
     assert_eq!(default_vp.viewport_height, None);
 }
+
+#[test]
+fn test_login_step_parses() {
+    let toml = r#"
+[[test]]
+name = "login"
+steps = [
+    { kind = "login", url = "/auth/login", email = "admin@example.com", password = "secret" },
+    { kind = "navigate", url = "/app/dashboard" },
+]
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse login step");
+    let steps = &scenario.test[0].steps;
+    assert_eq!(steps.len(), 2);
+    match &steps[0] {
+        llm_browser_testkit::scenario::TestStep::Login {
+            url,
+            email,
+            password,
+            ..
+        } => {
+            assert_eq!(url, "/auth/login");
+            assert_eq!(email, "admin@example.com");
+            assert_eq!(password, "secret");
+        }
+        other => panic!("expected Login step, got {other:?}"),
+    }
+}

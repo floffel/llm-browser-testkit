@@ -79,6 +79,7 @@ Every step has a `kind`. Required fields depend on the kind.
 | `kind` | What it does | Required | Optional |
 |--------|-------------|----------|----------|
 | `navigate` | Open a URL | `url` | `wait_after_ms` |
+| `login` | Idempotent login: fills the form if present, passes silently when already authenticated | `email`, `password` | `url` (default `/auth/login`), `wait_after_ms` |
 | `click` | Click an element | `target` | `selector`, `wait_after_ms`, `endpoint` |
 | `type` | Type into a field | `target`, `text` | `selector`, `wait_after_ms`, `endpoint` |
 | `wait` | Wait for an element and/or visible text | `target` | `selector`, `text`, `timeout_ms`, `endpoint` |
@@ -90,6 +91,24 @@ Every step has a `kind`. Required fields depend on the kind.
 **`target`** is natural language ("the submit button", "the search input"). The
 LLM looks at the page DOM and picks the right CSS selector at runtime. Skip the
 LLM with an explicit `selector`.
+
+**`login`** — navigate to the login page and authenticate. If the app is
+already signed in (no login form rendered), the step passes silently, so
+scenarios that run the same test across a viewport matrix — or repeat login
+steps in one browser session — stay green:
+
+```toml
+[[test.steps]]
+kind = "login"
+url = "/auth/login"
+email = "admin@example.com"
+password = "correct horse battery staple"
+```
+
+The step types into `#email` / `#password`, waits for a bot-protection token
+(`input[name="cf-turnstile-response"][value]:not([value=""])`, up to 30s),
+clicks `button.btn--landing.btn--primary` and waits for the authenticated
+shell (`app-account-shell`, up to 30s).
 
 **`endpoint`** routes this step to a specific [endpoint](#endpoints). Use it to
 send element targeting to one model and assertions to another.

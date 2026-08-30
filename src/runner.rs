@@ -448,6 +448,18 @@ impl ScenarioRunner {
                     let full_url = resolve_url(url, &base_url);
                     run_navigate_step(&full_url, tab)
                 }
+                TestStep::Login {
+                    url,
+                    email,
+                    password,
+                    wait_after_ms,
+                } => run_login_step(
+                    &resolve_url(url, &base_url),
+                    email,
+                    password,
+                    *wait_after_ms,
+                    tab,
+                ),
                 TestStep::Click {
                     target,
                     selector,
@@ -1795,6 +1807,128 @@ fn run_navigate_step(full_url: &str, tab: &Tab) -> StepResult {
     }
 }
 
+/// Idempotent login step: navigate to the login URL and, if a login
+/// form is rendered, fill it, wait for the bot-protection token,
+/// submit, and wait for the authenticated shell. When the app is
+/// already authenticated the login form never appears and the step
+/// passes silently — this keeps viewport-matrix variants and repeated
+/// logins in one browser session green.
+fn run_login_step(
+    full_url: &str,
+    email: &str,
+    password: &str,
+    wait_after_ms: Option<u64>,
+    tab: &Tab,
+) -> StepResult {
+    let name = format!("[login] {full_url}");
+    match tab.navigate_to(full_url) {
+        Ok(_) => {
+            let _ = tab.wait_until_navigated();
+            std::thread::sleep(Duration::from_millis(3000));
+        }
+        Err(e) => {
+            return StepResult {
+                name,
+                status: StepStatus::Failed,
+                message: format!("navigation failed: {e}"),
+            };
+        }
+    }
+
+    let form_present = eval_bool(tab, "document.querySelector('#email') !== null").unwrap_or(false);
+    if !form_present {
+        return StepResult {
+            name,
+            status: StepStatus::Passed,
+            message: "already authenticated (no login form rendered)".into(),
+        };
+    }
+
+    for (selector, text) in [("#email", email), ("#password", password)] {
+        match tab.wait_for_element_with_custom_timeout(selector, Duration::from_secs(5)) {
+            Ok(element) => {
+                let _ = element.click();
+                let js = format!("document.querySelector('{selector}').value = '';");
+                let _ = tab.evaluate(&js, false);
+                if let Err(e) = element.type_into(text) {
+                    return StepResult {
+                        name,
+                        status: StepStatus::Failed,
+                        message: format!("typing into {selector} failed: {e}"),
+                    };
+                }
+            }
+            Err(e) => {
+                return StepResult {
+                    name,
+                    status: StepStatus::Failed,
+                    message: format!("login input {selector} not found: {e}"),
+                };
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    // Bot-protection / Turnstile token. The dev estate uses the
+    // Turnstile test-mode widget; wait for the hidden field value.
+    let token_ok = (0..20).any(|_| {
+        std::thread::sleep(Duration::from_millis(1500));
+        eval_bool(
+            tab,
+            "document.querySelector('input[name=\"cf-turnstile-response\"][value]:not([value=\"\"])') !== null",
+        )
+        .unwrap_or(false)
+    });
+    if !token_ok {
+        return StepResult {
+            name,
+            status: StepStatus::Failed,
+            message: "bot-protection token never appeared (is the Turnstile widget in test mode?)"
+                .into(),
+        };
+    }
+
+    let sign_in_ok = match tab.wait_for_element_with_custom_timeout(
+        "button.btn--landing.btn--primary",
+        Duration::from_secs(5),
+    ) {
+        Ok(element) => element.click().is_ok(),
+        Err(_) => false,
+    };
+    if !sign_in_ok {
+        return StepResult {
+            name,
+            status: StepStatus::Failed,
+            message: "sign-in button not found or not clickable".into(),
+        };
+    }
+
+    // Wait for the authenticated shell.
+    let authed = (0..20).any(|_| {
+        std::thread::sleep(Duration::from_millis(1500));
+        eval_bool(tab, "document.querySelector('app-account-shell') !== null").unwrap_or(false)
+    });
+    if !authed {
+        return StepResult {
+            name,
+            status: StepStatus::Failed,
+            message:
+                "login submitted but the authenticated shell never appeared (bad credentials?)"
+                    .into(),
+        };
+    }
+
+    if let Some(ms) = wait_after_ms {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+
+    StepResult {
+        name,
+        status: StepStatus::Passed,
+        message: "authenticated".into(),
+    }
+}
+
 fn extract_dom_info(tab: &Tab) -> Result<String, String> {
     let result = tab
         .evaluate(DOM_EXTRACT_JS, false)
@@ -1859,6 +1993,7 @@ fn resolve_url(url: &str, base_url: &str) -> String {
 fn step_label(step: &TestStep) -> String {
     match step {
         TestStep::Navigate { url, .. } => format!("[navigate] {url}"),
+        TestStep::Login { url, .. } => format!("[login] {url}"),
         TestStep::Click { target, .. } => format!("[click] {target}"),
         TestStep::Type { target, .. } => format!("[type] {target}"),
         TestStep::Wait { target, .. } => format!("[wait] {target}"),
@@ -1892,6 +2027,7 @@ fn step_label(step: &TestStep) -> String {
 const fn step_kind_label(step: &TestStep) -> &'static str {
     match step {
         TestStep::Navigate { .. } => "navigate",
+        TestStep::Login { .. } => "login",
         TestStep::Click { .. } => "click",
         TestStep::Type { .. } => "type",
         TestStep::Wait { .. } => "wait",

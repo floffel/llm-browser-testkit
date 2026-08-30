@@ -329,6 +329,10 @@ const fn default_auto_navigate() -> bool {
     true
 }
 
+fn default_login_url() -> String {
+    "/auth/login".to_owned()
+}
+
 const fn default_temperature() -> f64 {
     0.0
 }
@@ -433,10 +437,30 @@ pub enum TestStep {
     /// Navigate the browser to a URL.
     #[serde(rename = "navigate")]
     Navigate {
-        /// URL to navigate to (absolute, or relative to the test's base
-        /// URL).
+        /// URL to navigate to (absolute, or relative to the test's
+        /// base URL).
         url: String,
         /// Milliseconds to wait after navigation completes.
+        #[serde(default)]
+        wait_after_ms: Option<u64>,
+    },
+
+    /// Idempotent login: navigate to the login URL; if the app is
+    /// already authenticated (no login form rendered), pass silently.
+    /// Otherwise fill the form, wait for the bot-protection token,
+    /// submit, and wait for the authenticated shell. Built for
+    /// scenarios that repeat login steps across viewport-matrix
+    /// variants in one browser session.
+    #[serde(rename = "login")]
+    Login {
+        /// Login page URL (relative to the base URL).
+        #[serde(default = "default_login_url")]
+        url: String,
+        /// Email / username to enter.
+        email: String,
+        /// Password to enter.
+        password: String,
+        /// Milliseconds to wait after the authenticated shell appears.
         #[serde(default)]
         wait_after_ms: Option<u64>,
     },
