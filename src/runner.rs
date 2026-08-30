@@ -20,6 +20,110 @@ use crate::truncate;
 use crate::LlmConfig;
 use crate::DOM_EXTRACT_JS;
 
+/// One detected layout defect (`layout_no_issues` preset).
+#[derive(Debug, serde::Deserialize)]
+struct LayoutIssue {
+    #[serde(rename = "type")]
+    issue_type: String,
+    element: String,
+    detail: String,
+}
+
+/// In-browser DOM layout scan for `layout_no_issues`.
+///
+/// Geometry-only checks (no LLM, no pixels):
+/// 1. page horizontal overflow (`scrollWidth` > viewport width);
+/// 2. visible, non-fixed elements that stick out of the viewport
+///    (right/bottom edge) while still partially on screen;
+/// 3. text clipped by `overflow: hidden` containers whose content
+///    is measurably larger than the box;
+/// 4. interactive elements (buttons/links/inputs) whose center point
+///    is covered by a different element that would intercept the click.
+///
+/// Intentional stacking (off-canvas drawers, dropdown menus, badges,
+/// fixed headers) is excluded by the position/relation filters.
+const LAYOUT_SCAN_JS: &str = r#"
+(() => {
+  const issues = [];
+  const push = (type, el, detail) => {
+    if (issues.length >= 30) return;
+    let element = el.tagName.toLowerCase();
+    if (el.id) element += '#' + el.id;
+    else if (typeof el.className === 'string' && el.className.trim())
+      element += '.' + el.className.trim().split(/\s+/).join('.');
+    issues.push({ type, element, detail: String(detail).slice(0, 220) });
+  };
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const vh = document.documentElement.clientHeight || window.innerHeight;
+  if (!vw || !vh) return JSON.stringify(issues);
+  const de = document.documentElement;
+  // 1. Page-level horizontal overflow.
+  if (de.scrollWidth > vw + 2)
+    push('page-overflow-x', de,
+      'page scrollWidth ' + de.scrollWidth + ' exceeds viewport width ' + vw);
+  const all = Array.prototype.slice.call(document.querySelectorAll('body *'));
+  const visible = (cs) => cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity || '1') !== 0;
+  const hasContent = (el) =>
+    ((el.textContent || '').trim().length > 0) ||
+    !!el.querySelector('img,svg,video,canvas,iframe,button,input,textarea,select');
+  // 2. Elements sticking out of the viewport (partially visible only).
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    if (!visible(cs)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    if (cs.position === 'fixed' || cs.position === 'sticky') continue;
+    if (!hasContent(el) && el.children.length === 0) continue;
+    if (r.top >= vh || r.left >= vw) continue; // fully offscreen = normal scroll content
+    const overRight = r.right - vw;
+    const overBottom = r.bottom - vh;
+    if (overRight > 2 || overBottom > 2) {
+      let where = '';
+      if (overRight > 2 && overBottom > 2) where = 'right+bottom edges';
+      else if (overRight > 2) where = 'right edge (' + Math.round(r.right) + ' > ' + vw + ')';
+      else where = 'bottom edge (' + Math.round(r.bottom) + ' > ' + vh + ')';
+      push('element-out-of-viewport', el, 'extends ' + Math.max(overRight, overBottom).toFixed(0) + 'px past the ' + where);
+    }
+  }
+  // 3. Text clipped by overflow:hidden containers.
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    if (cs.overflowX !== 'hidden' && cs.overflowY !== 'hidden') continue;
+    if (el.scrollWidth <= el.clientWidth + 2 && el.scrollHeight <= el.clientHeight + 2) continue;
+    if (!(el.textContent || '').trim()) continue;
+    push('text-clipped', el,
+      'content ' + el.scrollWidth + 'x' + el.scrollHeight +
+      ' clipped to ' + el.clientWidth + 'x' + el.clientHeight);
+  }
+  // 4. Interactive elements covered by a different element.
+  const interactive =
+    'button, a[href], input, textarea, select, [role="button"], [role="link"], [role="menuitem"], label, .mdc-button, .mat-mdc-button, .mat-mdc-icon-button, .mdc-fab';
+  const targets = document.querySelectorAll(interactive);
+  for (const el of targets) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 6 || r.height < 6) continue;
+    const cs = getComputedStyle(el);
+    if (!visible(cs)) continue;
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    if (cx < 0 || cy < 0 || cx > vw || cy > vh) continue;
+    const top = document.elementFromPoint(cx, cy);
+    if (!top || top === el || el.contains(top) || top.contains(el)) continue;
+    const tcs = getComputedStyle(top);
+    if (!visible(tcs)) continue;
+    if (tcs.pointerEvents === 'none') continue;
+    const tr = top.getBoundingClientRect();
+    if (tr.width * tr.height < r.width * r.height * 0.25) continue;
+    const tname = top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') +
+      (typeof top.className === 'string' && top.className.trim() ? '.' + top.className.trim().split(/\s+/).join('.') : '');
+    push('element-overlap', el,
+      'center point at ' + Math.round(cx) + ',' + Math.round(cy) +
+      ' is covered by <' + tname + '>');
+  }
+  return JSON.stringify(issues);
+})()
+"#;
+
 /// How long the CDP connection stays open after the browser goes quiet.
 ///
 /// `headless_chrome` ships a 30s default and tears down the entire connection
@@ -36,6 +140,9 @@ pub struct ScenarioRunner {
     timeout: Duration,
     viewport_width: u32,
     viewport_height: u32,
+    /// The viewport currently applied in the browser (CDP emulation).
+    /// Per-test overrides switch it mid-run; `(0, 0)` = not yet applied.
+    applied_viewport: std::cell::Cell<(u32, u32)>,
     endpoints: EndpointRegistry,
     usage: Arc<UsageTracker>,
     budgets: BudgetTracker,
@@ -122,6 +229,11 @@ const ASSERTION_PRESETS: &[AssertPreset] = &[
         system: "You are a visual QA engineer inspecting a website screenshot. Determine whether a specific text is FULLY visible and readable: present in the viewport, not clipped, not cut off, not covered by another element, and not obscured by overlays or low contrast stacking. A partial word or a covered text counts as FAIL.",
         user_template: "Inspect the attached screenshot and the page text below.\n\nTEXT TO CHECK: \"{expected_text}\"\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nIs the text fully visible and readable in the screenshot (not clipped, covered, or hidden)? Respond with exactly \"PASS\" if it is fully visible, or \"FAIL: <explain what hides or clips it>\" otherwise.",
     },
+    AssertPreset {
+        name: "layout_no_issues",
+        system: "DOM layout scanner: reports horizontal page overflow, elements sticking out of the viewport, clipped text in overflow:hidden containers, and interactive elements covered by other elements. Deterministic in-browser checks — no LLM call.",
+        user_template: "Runs a deterministic DOM layout scan in the browser (no LLM call). Fails with the list of detected issues.",
+    },
 ];
 
 impl ScenarioRunner {
@@ -164,6 +276,7 @@ impl ScenarioRunner {
             timeout: Duration::from_secs(scenario_config.timeout_secs.unwrap_or(60)),
             viewport_width: scenario_config.viewport_width.unwrap_or(1280),
             viewport_height: scenario_config.viewport_height.unwrap_or(720),
+            applied_viewport: std::cell::Cell::new((0, 0)),
             config: scenario_config.clone(),
             definitions: defs_map,
             llm,
@@ -292,6 +405,15 @@ impl ScenarioRunner {
             .clone()
             .or_else(|| self.config.base_url.clone())
             .unwrap_or_else(crate::base_url);
+
+        // Per-test viewport override: switch the browser via CDP
+        // device-metrics emulation before this test runs.
+        let vw = test.viewport_width.unwrap_or(self.viewport_width);
+        let vh = test.viewport_height.unwrap_or(self.viewport_height);
+        if self.applied_viewport.get() != (vw, vh) {
+            self.apply_viewport(tab, vw, vh);
+            self.applied_viewport.set((vw, vh));
+        }
 
         let auto_navigate = test.auto_navigate.unwrap_or(self.config.auto_navigate);
 
@@ -498,6 +620,36 @@ impl ScenarioRunner {
         }
 
         result
+    }
+
+    /// Applies a viewport size to the current tab via CDP
+    /// `Emulation.setDeviceMetricsOverride`. Used by per-test viewport
+    /// overrides and the viewport matrix. The initial window size set at
+    /// browser launch is replaced by emulation; failures are logged but
+    /// do not fail the test (a mismatched viewport only weakens coverage).
+    fn apply_viewport(&self, tab: &Tab, width: u32, height: u32) {
+        use headless_chrome::protocol::cdp::Emulation;
+        let _ = self;
+        let params = Emulation::SetDeviceMetricsOverride {
+            width,
+            height,
+            device_scale_factor: 1.0,
+            mobile: false,
+            scale: None,
+            screen_width: Some(width),
+            screen_height: Some(height),
+            position_x: None,
+            position_y: None,
+            dont_set_visible_size: None,
+            screen_orientation: None,
+            viewport: None,
+            display_feature: None,
+            device_posture: None,
+        };
+        eprintln!("      ↻ viewport: {width}x{height}");
+        if let Err(e) = tab.call_method(params) {
+            eprintln!("      ⚠️  viewport switch to {width}x{height} failed: {e}");
+        }
     }
 
     // ── step handlers ───────────────────────────────────────────────────
@@ -778,6 +930,7 @@ impl ScenarioRunner {
                     image.as_deref(),
                     step_endpoint,
                     test_endpoint,
+                    tab,
                 );
             }
             return StepResult {
@@ -788,6 +941,11 @@ impl ScenarioRunner {
         }
 
         if let Some(preset_name) = preset {
+            // Deterministic DOM layout scan — runs JS in the browser and
+            // never calls the LLM (free, fast, no pixel budget).
+            if preset_name == "layout_no_issues" {
+                return self.run_layout_preset(tab);
+            }
             return self.run_preset(
                 preset_name,
                 assert_text,
@@ -822,6 +980,7 @@ impl ScenarioRunner {
         image: Option<&str>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
+        tab: &Tab,
     ) -> StepResult {
         // Agent-based definition: delegate to an A2A agent
         if let Some(ref agent) = def.agent {
@@ -872,6 +1031,9 @@ impl ScenarioRunner {
                 )
             },
             |preset_name| {
+                if preset_name == "layout_no_issues" {
+                    return self.run_layout_preset(tab);
+                }
                 self.run_preset(
                     preset_name,
                     def.assert_text.as_deref(),
@@ -1079,6 +1241,67 @@ impl ScenarioRunner {
                 }
             },
         )
+    }
+
+    /// Runs the deterministic DOM layout scan (`layout_no_issues`).
+    ///
+    /// Evaluates the layout-scan JS in the page and fails with the list of
+    /// detected issues: horizontal page overflow, visible elements sticking
+    /// out of the viewport, text clipped by `overflow: hidden` containers,
+    /// and interactive elements covered by other elements. No LLM call —
+    /// checks are geometry-based so the check is free, deterministic, and
+    /// safe to run on every page × viewport variant.
+    fn run_layout_preset(&self, tab: &Tab) -> StepResult {
+        let _ = self;
+        let name = "[assert] layout_no_issues".to_owned();
+        eprintln!("      assert: layout_no_issues (DOM layout scan)");
+        let result = tab.evaluate(LAYOUT_SCAN_JS, false);
+        let json_str = match result {
+            Ok(r) => r
+                .value
+                .as_ref()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "[]".to_owned()),
+            Err(e) => {
+                return StepResult {
+                    name,
+                    status: StepStatus::Failed,
+                    message: format!("layout scan JS failed: {e}"),
+                };
+            }
+        };
+        let issues: Vec<LayoutIssue> = serde_json::from_str(&json_str).unwrap_or_default();
+        if issues.is_empty() {
+            return StepResult {
+                name,
+                status: StepStatus::Passed,
+                message: "PASS — no layout defects detected".into(),
+            };
+        }
+        let mut lines: Vec<String> = issues
+            .iter()
+            .take(10)
+            .map(|i| {
+                format!(
+                    "- [{type_}] {element}: {detail}",
+                    type_ = i.issue_type,
+                    element = i.element,
+                    detail = i.detail
+                )
+            })
+            .collect();
+        if issues.len() > 10 {
+            lines.push(format!("- … and {} more", issues.len() - 10));
+        }
+        StepResult {
+            name,
+            status: StepStatus::Failed,
+            message: format!(
+                "FAIL — {} layout defect(s) detected:\n{}",
+                issues.len(),
+                lines.join("\n")
+            ),
+        }
     }
 
     fn run_custom(

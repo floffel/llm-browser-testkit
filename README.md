@@ -198,6 +198,73 @@ banner overlay. The prompts of the visual presets are intentionally strict
 ("only fail on clearly visible, user-impacting defects") — tune them per app
 if your overlay detection needs to be more or less sensitive.
 
+## DOM layout assertions (`layout_no_issues`)
+
+Vision models see pixels but cost money per page × viewport. For cheap,
+deterministic layout coverage there is a DOM-only preset that never calls
+the LLM:
+
+```toml
+[[test.steps]]
+kind = "assert"
+preset = "layout_no_issues"   # no endpoint, no screenshot, no tokens
+```
+
+It evaluates a geometry scan in the page and fails with the detected issues:
+
+- **page-overflow-x** — the document is wider than the viewport
+  (horizontal scrolling or a runaway element);
+- **element-out-of-viewport** — a visible, non-fixed element sticks out of
+  the right/bottom viewport edge while still partially on screen;
+- **text-clipped** — content inside an `overflow: hidden` container is
+  measurably larger than the box (cut-off text);
+- **element-overlap** — an interactive element's center point is covered
+  by a different element that would intercept the click.
+
+Intentional stacking (off-canvas drawers, dropdowns, badges, fixed headers,
+fully-offscreen scroll content) is excluded by position/relation filters.
+Run it after every page load — it is free, so it is also the perfect
+companion for the viewport matrix below.
+
+## Viewport matrix (mobile / tablet / desktop)
+
+`[config.viewport_matrix]` expands **every test** in a scenario into one
+variant per named viewport. Each variant overrides the browser viewport via
+CDP device-metrics emulation and gets a ` — <name>` suffix on the test name;
+per-test budgets apply per variant.
+
+```toml
+[config.viewport_matrix]
+viewports = [
+  { name = "mobile",  width = 390,  height = 844 },
+  { name = "tablet",  width = 768,  height = 1024 },
+  { name = "desktop", width = 1280, height = 720 },
+]
+
+[[test]]
+name = "Dashboard renders"
+steps = [
+    { kind = "navigate", url = "/dashboard", wait_after_ms = 2000 },
+    { kind = "assert", preset = "layout_no_issues" },
+]
+```
+
+The above runs "Dashboard renders — mobile", "— tablet" and "— desktop",
+each at its viewport, and the layout scan flags sticky overlays, off-screen
+text, or covered controls per size. Use it with `screenshot = true` +
+`visual_no_issues` on a vision endpoint for pixel-level checks on top.
+
+Single-test overrides work too — any `[[test]]` may set
+`viewport_width` / `viewport_height` directly, which also switches the
+browser viewport via CDP for just that test:
+
+```toml
+[[test]]
+name = "Narrow phone layout"
+viewport_width = 320
+viewport_height = 568
+```
+
 ## Assertion presets
 
 Built-in presets you can use inline or from `[[definitions]]`.
@@ -207,6 +274,7 @@ Built-in presets you can use inline or from `[[definitions]]`.
 | `no_error_on_page` | No errors, stack traces, or broken UI on the page |
 | `text_visible` | Specific text appears on the page (`assert_text`) |
 | `element_exists` | A described UI element is present |
+| `layout_no_issues` | **DOM scan, no LLM**: page overflow, elements out of viewport, clipped text, covered controls |
 | `visual_no_issues` | **Screenshot**: no layout/rendering defects (overlaps, clipping, cut-off content, broken images, blank panels) |
 | `visual_no_overlaps` | **Screenshot**: no elements covering other content or intercepting clicks |
 | `visual_text_visible` | **Screenshot**: `assert_text` is fully visible and readable (not clipped or covered) |

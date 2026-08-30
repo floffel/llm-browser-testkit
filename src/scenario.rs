@@ -147,6 +147,32 @@ pub struct ScenarioConfig {
     /// Defaults to `artifacts`.
     #[serde(default)]
     pub artifacts_dir: Option<String>,
+    /// Optional viewport matrix: when set, every test in the scenario is
+    /// expanded into one variant per viewport (e.g. mobile/tablet/desktop).
+    /// Each variant overrides the test's viewport and gets a ` — <name>`
+    /// suffix on the test name. Per-test budgets apply per variant.
+    #[serde(default)]
+    pub viewport_matrix: Option<ViewportMatrix>,
+}
+
+/// A list of named viewports a scenario is expanded across.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ViewportMatrix {
+    /// The viewport variants (`{name, width, height}`).
+    #[serde(default)]
+    pub viewports: Vec<ViewportDef>,
+}
+
+/// One named viewport size in a matrix.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ViewportDef {
+    /// Human-readable variant name (appended to test names, e.g.
+    /// `— mobile`).
+    pub name: String,
+    /// Browser viewport width in pixels.
+    pub width: u32,
+    /// Browser viewport height in pixels.
+    pub height: u32,
 }
 
 /// A named endpoint definition with pricing.
@@ -361,7 +387,7 @@ pub struct AssertDefinition {
 }
 
 /// A group of steps that form a single test scenario.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TestGroup {
     /// Human-readable test name.
     pub name: String,
@@ -380,6 +406,13 @@ pub struct TestGroup {
     /// Override the global `browser_headless` for this test.
     #[serde(default)]
     pub browser_headless: Option<bool>,
+    /// Override the global viewport width for this test (applied via CDP
+    /// `Emulation.setDeviceMetricsOverride` before the test runs).
+    #[serde(default)]
+    pub viewport_width: Option<u32>,
+    /// Override the global viewport height for this test.
+    #[serde(default)]
+    pub viewport_height: Option<u32>,
     /// Per-test budget override.
     #[serde(default)]
     pub budget: Option<BudgetDef>,
@@ -394,7 +427,7 @@ pub struct TestGroup {
 
 /// A single step in a test. The `kind` field determines which variant is
 /// deserialized and which field constraints apply.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "kind")]
 pub enum TestStep {
     /// Navigate the browser to a URL.

@@ -302,9 +302,41 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let definitions = std::mem::take(&mut scenario_def.definitions);
+
+            // Viewport matrix expansion: when [config.viewport_matrix] is
+            // set, duplicate every test once per named viewport. Each
+            // variant overrides the test's viewport and gets a " — <name>"
+            // suffix so the report shows exactly which size ran.
+            let mut expanded_tests = std::mem::take(&mut scenario_def.test);
+            if let Some(matrix) = &config.viewport_matrix {
+                if !matrix.viewports.is_empty() {
+                    let mut expanded: Vec<llm_browser_testkit::scenario::TestGroup> = Vec::new();
+                    for test in expanded_tests {
+                        for vp in &matrix.viewports {
+                            let mut variant = test.clone();
+                            variant.name = format!("{} — {}", test.name, vp.name);
+                            variant.viewport_width = Some(vp.width);
+                            variant.viewport_height = Some(vp.height);
+                            expanded.push(variant);
+                        }
+                    }
+                    expanded_tests = expanded;
+                    eprintln!(
+                        "Viewport matrix: {} variants per test ({})",
+                        matrix.viewports.len(),
+                        matrix
+                            .viewports
+                            .iter()
+                            .map(|v| format!("{}={}x{}", v.name, v.width, v.height))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                }
+            }
+
             let runner = llm_browser_testkit::runner::ScenarioRunner::new(config, definitions);
 
-            let report = runner.run(&scenario_def.test)?;
+            let report = runner.run(&expanded_tests)?;
 
             eprintln!("\n═══════════════════════════════════════");
             eprintln!(

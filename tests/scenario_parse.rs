@@ -359,3 +359,55 @@ steps = [
         _ => panic!("expected Wait step"),
     }
 }
+
+#[test]
+fn test_viewport_matrix_config() {
+    let toml = r#"
+[config]
+viewport_width = 1280
+viewport_height = 720
+
+[config.viewport_matrix]
+viewports = [
+    { name = "mobile", width = 390, height = 844 },
+    { name = "desktop", width = 1280, height = 720 },
+]
+
+[[test]]
+name = "smoke"
+steps = []
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse matrix TOML");
+    let matrix = scenario.config.viewport_matrix.expect("matrix present");
+    assert_eq!(matrix.viewports.len(), 2);
+    assert_eq!(matrix.viewports[0].name, "mobile");
+    assert_eq!(matrix.viewports[0].width, 390);
+    assert_eq!(matrix.viewports[0].height, 844);
+    assert_eq!(matrix.viewports[1].name, "desktop");
+}
+
+#[test]
+fn test_per_test_viewport_override() {
+    let toml = r#"
+[config]
+viewport_width = 1280
+viewport_height = 720
+
+[[test]]
+name = "mobile variant"
+viewport_width = 390
+viewport_height = 844
+steps = []
+
+[[test]]
+name = "default viewport"
+steps = []
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse TOML");
+    let mobile = &scenario.test[0];
+    assert_eq!(mobile.viewport_width, Some(390));
+    assert_eq!(mobile.viewport_height, Some(844));
+    let default_vp = &scenario.test[1];
+    assert_eq!(default_vp.viewport_width, None);
+    assert_eq!(default_vp.viewport_height, None);
+}
