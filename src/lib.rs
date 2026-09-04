@@ -176,18 +176,21 @@ pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<Strin
 /// and token usage from the API response.
 ///
 /// Retries transient failures (network errors, HTTP 429/5xx, invalid
-/// responses) with a short backoff, and returns the last underlying error
-/// instead of collapsing everything into a generic "server down" message.
-/// The error text includes the HTTP status and a truncated response-body
-/// snippet, so a gateway that answers with an HTML error page is
-/// identifiable in CI logs instead of surfacing as a bare JSON decode
-/// error.
+/// responses, and HTTP 200 + empty body — a gateway warm-up signature,
+/// retried with a 3s backoff) with a short backoff, and returns the last
+/// underlying error instead of collapsing everything into a generic
+/// "server down" message. The error text includes the HTTP status and a
+/// truncated response-body snippet, so a gateway that answers with an
+/// HTML error page is identifiable in CI logs instead of surfacing as a
+/// bare JSON decode error. Deterministic client errors (401/403/404) are
+/// not retried.
 ///
 /// # Errors
 ///
 /// Returns the last underlying error as a human-readable string when every
 /// attempt fails (transport error, non-success HTTP status, response that is
-/// not valid JSON, or a response missing `choices[0].message.content`).
+/// not valid JSON, an empty HTTP 200 body, or a response missing
+/// `choices[0].message.content`).
 pub async fn llm_chat_with_usage(
     llm: &LlmConfig,
     system: &str,
@@ -232,11 +235,18 @@ async fn chat_with_retry(
         match llm_chat_once(&client, llm, system, user, image_data_url).await {
             Ok(resp) => return Ok(resp),
             Err(err) => {
+                // An HTTP 200 with an empty body is a gateway warm-up
+                // signature: give it a longer window to finish booting
+                // instead of hammering it with short retries.
+                let backoff = match &err {
+                    LlmCallError::EmptyBody { .. } => Duration::from_secs(3),
+                    _ => Duration::from_millis(500 * u64::from(attempts)),
+                };
                 last_err = err.to_string();
                 if attempts >= LLM_CALL_ATTEMPTS || !err.is_retryable() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(500 * u64::from(attempts))).await;
+                tokio::time::sleep(backoff).await;
             }
         }
     }
@@ -284,6 +294,10 @@ enum LlmCallError {
         detail: String,
         body: String,
     },
+    /// Success status with an EMPTY body — the classic transient gateway
+    /// warm-up signature (HTTP 200, zero bytes). Retried with a longer
+    /// backoff than other errors.
+    EmptyBody { status: u16 },
     /// Valid JSON but missing `choices[0].message.content`.
     MissingContent { json: String },
 }
@@ -308,6 +322,10 @@ impl std::fmt::Display for LlmCallError {
                 "LLM endpoint returned HTTP {status} with non-JSON body ({detail}): {}",
                 truncate(body, 300)
             ),
+            Self::EmptyBody { status } => write!(
+                f,
+                "LLM endpoint returned HTTP {status} with an empty response (likely gateway warm-up)"
+            ),
             Self::MissingContent { json } => write!(
                 f,
                 "LLM response missing choices[0].message.content: {}",
@@ -324,7 +342,7 @@ impl LlmCallError {
     #[must_use]
     fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport { .. } | Self::MissingContent { .. } => true,
+            Self::Transport { .. } | Self::MissingContent { .. } | Self::EmptyBody { .. } => true,
             Self::Http { status, .. } => {
                 *status == 408 || *status == 429 || (500..600).contains(status)
             }
@@ -391,6 +409,11 @@ async fn llm_chat_once(
             status: status_u16,
             body,
         });
+    }
+    if body.trim().is_empty() {
+        // HTTP 200 + empty body: a transient gateway hiccup (cold-start /
+        // warm-up), not a client error. Retried with a longer backoff.
+        return Err(LlmCallError::EmptyBody { status: status_u16 });
     }
     let json: Value = match serde_json::from_str(&body) {
         Ok(v) => v,

@@ -145,6 +145,47 @@ async fn test_transient_then_success_recovers() {
 }
 
 #[tokio::test]
+async fn test_empty_200_is_transient_and_recovers() {
+    let server = MockServer::start().await;
+    let failures = std::sync::atomic::AtomicU32::new(0);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            if failures.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                ResponseTemplate::new(200).set_body_string("")
+            } else {
+                ResponseTemplate::new(200).set_body_json(ok_body())
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let resp = llm_chat_with_usage(&config(&server.uri()), "sys", "user")
+        .await
+        .expect("empty-200 retry should recover");
+    assert_eq!(resp.content, "PASS");
+}
+
+#[tokio::test]
+async fn test_empty_200_message_names_gateway_warmup() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let err = llm_chat_with_usage(&config(&server.uri()), "sys", "user")
+        .await
+        .expect_err("empty 200 should fail after all attempts");
+    assert!(err.contains("HTTP 200"), "err: {err}");
+    assert!(err.contains("empty response"), "err: {err}");
+    assert!(err.contains("warm-up"), "err: {err}");
+    // Retried like a transient failure, not failed fast.
+    assert!(err.contains("3 attempt"), "err: {err}");
+}
+
+#[tokio::test]
 async fn test_request_payload_shape() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

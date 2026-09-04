@@ -271,15 +271,28 @@ It evaluates a geometry scan in the page and fails with the detected issues:
 
 - **page-overflow-x** — the document is wider than the viewport
   (horizontal scrolling or a runaway element);
-- **element-out-of-viewport** — a visible, non-fixed element sticks out of
-  the right/bottom viewport edge while still partially on screen;
+- **element-out-of-viewport** — a visible element that scrolling cannot
+  reveal: a fixed element outside the viewport, left/negative overflow,
+  right-edge overflow beyond the scrollable content, or bottom overflow
+  on a page that cannot scroll down. Below-the-fold content on a tall
+  scrollable page is normal flow and is NOT reported;
 - **text-clipped** — content inside an `overflow: hidden` container is
   measurably larger than the box (cut-off text);
 - **element-overlap** — an interactive element's center point is covered
   by a different element that would intercept the click.
 
-Intentional stacking (off-canvas drawers, dropdowns, badges, fixed headers,
-fully-offscreen scroll content) is excluded by position/relation filters.
+Intentional stacking (off-canvas drawers, dropdowns, badges, sticky
+headers) is excluded by position/relation filters. Elements whose class
+matches a prefix in `[config] layout_ignore_classes` are skipped by the
+fixed-element, text-clipped, and overlap checks — the default covers the
+Angular CDK screen-reader helpers (`.cdk-visually-hidden`,
+`.cdk-describedby-message-container`, `.cdk-overlay-container`), which
+are intentionally 1x1 / off-screen:
+
+```toml
+[config]
+layout_ignore_classes = ["cdk-visually-hidden", "cdk-describedby-message-container", "cdk-overlay-container"]
+```
 Run it after every page load — it is free, so it is also the perfect
 companion for the viewport matrix below.
 

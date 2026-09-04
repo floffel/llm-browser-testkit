@@ -33,15 +33,25 @@ struct LayoutIssue {
 ///
 /// Geometry-only checks (no LLM, no pixels):
 /// 1. page horizontal overflow (`scrollWidth` > viewport width);
-/// 2. visible, non-fixed elements that stick out of the viewport
-///    (right/bottom edge) while still partially on screen;
+/// 2. elements outside the viewport that scrolling cannot reveal
+///    (fixed elements off-screen, left/negative overflow, right-edge
+///    overflow beyond the horizontally scrollable area, and bottom
+///    overflow on a page that cannot scroll down) — below-the-fold
+///    content on a tall scrollable page is normal flow, NOT a defect;
 /// 3. text clipped by `overflow: hidden` containers whose content
 ///    is measurably larger than the box;
 /// 4. interactive elements (buttons/links/inputs) whose center point
 ///    is covered by a different element that would intercept the click.
 ///
+/// Elements whose class matches a configured ignore prefix (default:
+/// the Angular CDK screen-reader helpers `cdk-visually-hidden`,
+/// `cdk-describedby-message-container`, `cdk-overlay-container`) are
+/// skipped — they are intentionally 1x1 / off-screen. The prefix list
+/// is injected at `__IGNORE_CLASSES__` from
+/// [`ScenarioConfig::layout_ignore_classes`].
+///
 /// Intentional stacking (off-canvas drawers, dropdown menus, badges,
-/// fixed headers) is excluded by the position/relation filters.
+/// sticky headers) is excluded by the position/relation filters.
 const LAYOUT_SCAN_JS: &str = r#"
 (() => {
   const issues = [];
@@ -61,32 +71,84 @@ const LAYOUT_SCAN_JS: &str = r#"
   if (de.scrollWidth > vw + 2)
     push('page-overflow-x', de,
       'page scrollWidth ' + de.scrollWidth + ' exceeds viewport width ' + vw);
+  // Class-name prefixes to skip (injected; default = Angular CDK
+  // screen-reader helpers, which are intentionally 1x1 / off-screen).
+  const ignorePrefixes = __IGNORE_CLASSES__;
+  const isIgnored = (el) => {
+    if (typeof el.className !== 'string' || !el.className.trim()) return false;
+    const classes = el.className.trim().split(/\s+/);
+    return classes.some((c) => ignorePrefixes.some((p) => c.startsWith(p)));
+  };
+  const vScrollable = de.scrollHeight > vh + 2;
+  const hScrollable = de.scrollWidth > vw + 2;
   const all = Array.prototype.slice.call(document.querySelectorAll('body *'));
   const visible = (cs) => cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity || '1') !== 0;
   const hasContent = (el) =>
     ((el.textContent || '').trim().length > 0) ||
     !!el.querySelector('img,svg,video,canvas,iframe,button,input,textarea,select');
-  // 2. Elements sticking out of the viewport (partially visible only).
+  // 2. Elements outside the viewport that scrolling cannot reveal.
   for (const el of all) {
     const cs = getComputedStyle(el);
     if (!visible(cs)) continue;
+    if (isIgnored(el)) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
-    if (cs.position === 'fixed' || cs.position === 'sticky') continue;
     if (!hasContent(el) && el.children.length === 0) continue;
-    if (r.top >= vh || r.left >= vw) continue; // fully offscreen = normal scroll content
+    if (cs.position === 'fixed') {
+      // Fixed elements never move with the scroll: any edge outside the
+      // viewport is unreachable content and therefore a defect.
+      const overTop = -r.top;
+      const overLeft = -r.left;
+      const overRight = r.right - vw;
+      const overBottom = r.bottom - vh;
+      if (overTop > 2 || overLeft > 2 || overRight > 2 || overBottom > 2) {
+        let where = '';
+        if (overTop > 2 && overLeft > 2) where = 'top+left edges';
+        else if (overTop > 2) where = 'top edge (' + Math.round(r.top) + ' < 0)';
+        else if (overLeft > 2) where = 'left edge (' + Math.round(r.left) + ' < 0)';
+        else if (overRight > 2 && overBottom > 2) where = 'right+bottom edges';
+        else if (overRight > 2) where = 'right edge (' + Math.round(r.right) + ' > ' + vw + ')';
+        else where = 'bottom edge (' + Math.round(r.bottom) + ' > ' + vh + ')';
+        push('element-out-of-viewport', el,
+          'fixed element lies ' + Math.max(overTop, overLeft, overRight, overBottom).toFixed(0) + 'px past the ' + where);
+      }
+      continue;
+    }
+    if (cs.position === 'sticky') continue;
+    // Negative left overflow cannot be reached by scrolling (scrollLeft
+    // never goes below 0).
+    if (r.left < -2) {
+      push('element-out-of-viewport', el,
+        'extends ' + Math.round(-r.left).toFixed(0) + 'px past the left edge (' + Math.round(r.left) + ' < 0)');
+      continue;
+    }
+    // Negative top with the page at the top means the element sits above
+    // the document origin — also unreachable.
+    if (r.top < -2 && de.scrollTop <= 2) {
+      push('element-out-of-viewport', el,
+        'extends ' + Math.round(-r.top).toFixed(0) + 'px past the top edge (' + Math.round(r.top) + ' < 0)');
+      continue;
+    }
     const overRight = r.right - vw;
+    // Right-edge overflow is only a defect when the page cannot scroll
+    // horizontally to reveal it (or the element sticks out past the
+    // scrollable content width itself).
+    if (overRight > 2 && (!hScrollable || r.right > de.scrollWidth + 2)) {
+      push('element-out-of-viewport', el,
+        'extends ' + overRight.toFixed(0) + 'px past the right edge (' + Math.round(r.right) + ' > ' + vw + ')');
+      continue;
+    }
+    // Below-the-fold content on a scrollable page is normal (tall landing
+    // pages); only flag bottom overflow the user can never scroll to.
     const overBottom = r.bottom - vh;
-    if (overRight > 2 || overBottom > 2) {
-      let where = '';
-      if (overRight > 2 && overBottom > 2) where = 'right+bottom edges';
-      else if (overRight > 2) where = 'right edge (' + Math.round(r.right) + ' > ' + vw + ')';
-      else where = 'bottom edge (' + Math.round(r.bottom) + ' > ' + vh + ')';
-      push('element-out-of-viewport', el, 'extends ' + Math.max(overRight, overBottom).toFixed(0) + 'px past the ' + where);
+    if (overBottom > 2 && (!vScrollable || r.bottom > de.scrollHeight + 2)) {
+      push('element-out-of-viewport', el,
+        'extends ' + overBottom.toFixed(0) + 'px past the bottom edge (' + Math.round(r.bottom) + ' > ' + vh + ')');
     }
   }
   // 3. Text clipped by overflow:hidden containers.
   for (const el of all) {
+    if (isIgnored(el)) continue;
     const cs = getComputedStyle(el);
     if (cs.overflowX !== 'hidden' && cs.overflowY !== 'hidden') continue;
     if (el.scrollWidth <= el.clientWidth + 2 && el.scrollHeight <= el.clientHeight + 2) continue;
@@ -100,6 +162,7 @@ const LAYOUT_SCAN_JS: &str = r#"
     'button, a[href], input, textarea, select, [role="button"], [role="link"], [role="menuitem"], label, .mdc-button, .mat-mdc-button, .mat-mdc-icon-button, .mdc-fab';
   const targets = document.querySelectorAll(interactive);
   for (const el of targets) {
+    if (isIgnored(el)) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 6 || r.height < 6) continue;
     const cs = getComputedStyle(el);
@@ -109,6 +172,7 @@ const LAYOUT_SCAN_JS: &str = r#"
     if (cx < 0 || cy < 0 || cx > vw || cy > vh) continue;
     const top = document.elementFromPoint(cx, cy);
     if (!top || top === el || el.contains(top) || top.contains(el)) continue;
+    if (isIgnored(top)) continue;
     const tcs = getComputedStyle(top);
     if (!visible(tcs)) continue;
     if (tcs.pointerEvents === 'none') continue;
@@ -415,6 +479,9 @@ impl ScenarioRunner {
             self.applied_viewport.set((vw, vh));
         }
 
+        // Per-test isolation: every test starts from its own start_url
+        // (unless auto_navigate is disabled), so a test never inherits the
+        // previous test's page state.
         let auto_navigate = test.auto_navigate.unwrap_or(self.config.auto_navigate);
 
         let start_url = test
@@ -1318,10 +1385,14 @@ impl ScenarioRunner {
     /// checks are geometry-based so the check is free, deterministic, and
     /// safe to run on every page × viewport variant.
     fn run_layout_preset(&self, tab: &Tab) -> StepResult {
-        let _ = self;
         let name = "[assert] layout_no_issues".to_owned();
         eprintln!("      assert: layout_no_issues (DOM layout scan)");
-        let result = tab.evaluate(LAYOUT_SCAN_JS, false);
+        let js = LAYOUT_SCAN_JS.replace(
+            "__IGNORE_CLASSES__",
+            &serde_json::to_string(&self.config.layout_ignore_classes)
+                .unwrap_or_else(|_| "[]".to_owned()),
+        );
+        let result = tab.evaluate(&js, false);
         let json_str = match result {
             Ok(r) => r
                 .value

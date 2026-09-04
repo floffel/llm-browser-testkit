@@ -153,6 +153,14 @@ pub struct ScenarioConfig {
     /// suffix on the test name. Per-test budgets apply per variant.
     #[serde(default)]
     pub viewport_matrix: Option<ViewportMatrix>,
+    /// Class-name prefixes the `layout_no_issues` scan skips: elements
+    /// whose class matches any prefix are ignored by the fixed-element,
+    /// text-clipped, and overlap checks. Defaults cover the Angular CDK
+    /// screen-reader helpers (`cdk-visually-hidden`,
+    /// `cdk-describedby-message-container`, `cdk-overlay-container`),
+    /// which are intentionally 1x1 / off-screen.
+    #[serde(default = "default_layout_ignore_classes")]
+    pub layout_ignore_classes: Vec<String>,
 }
 
 /// A list of named viewports a scenario is expanded across.
@@ -327,6 +335,14 @@ where
 
 const fn default_auto_navigate() -> bool {
     true
+}
+
+fn default_layout_ignore_classes() -> Vec<String> {
+    vec![
+        "cdk-visually-hidden".to_owned(),
+        "cdk-describedby-message-container".to_owned(),
+        "cdk-overlay-container".to_owned(),
+    ]
 }
 
 const fn default_temperature() -> f64 {
