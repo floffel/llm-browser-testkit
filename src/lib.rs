@@ -26,11 +26,13 @@ pub mod costs;
 pub mod diagnostics;
 /// Endpoint registry and routing resolver.
 pub mod endpoints;
+/// Typed run events emitted by the runner.
+pub mod events;
 /// MCP client for connecting to external MCP servers.
 pub mod mcp_client;
 /// MCP server for exposing the framework as an MCP server.
 pub mod mcp_server;
-/// Cost and token report printer.
+/// Run reporting: console, NDJSON, JUnit, GitHub and Perfetto sinks.
 pub mod reporting;
 /// Step-by-step scenario executor (navigate, click, type, wait, assert).
 pub mod runner;
@@ -553,19 +555,45 @@ pub const DOM_EXTRACT_JS: &str = r#"
 })()
 "#;
 
-/// Truncates a string to the given maximum length, appending a marker
-/// if truncation occurred.
+/// Truncates a string to the given maximum length, appending a marker with
+/// the number of omitted characters if truncation occurred.
+///
+/// The cut point is always a UTF-8 char boundary, so multi-byte input (umlauts,
+/// emoji, CJK) can never panic the caller.
 #[must_use]
 pub fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_owned()
     } else {
-        format!("{}...<truncated>", &s[..max_len])
+        let cut = floor_char_boundary(s, max_len);
+        let omitted = s[cut..].chars().count();
+        format!("{}...<truncated {omitted} chars>", &s[..cut])
     }
+}
+
+/// Returns the largest char boundary index in `s` that is `<= index`.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    let index = index.min(s.len());
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 #[cfg(test)]
 mod tests {
+    /// Serializes env-var-mutating tests: they race when the test binary runs
+    /// them in parallel, which intermittently failed CI.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquires the env lock for one test.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     use crate::costs::extract_usage;
     use crate::truncate;
     use crate::{default_llm_attempts, llm_base_url, llm_model, parse_headers_env, LlmConfig};
@@ -651,6 +679,7 @@ mod tests {
 
     #[test]
     fn test_default_llm_attempts_env() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_CALL_ATTEMPTS", "7");
         assert_eq!(default_llm_attempts(), 7);
         std::env::set_var("HARNESS_LLM_CALL_ATTEMPTS", "0");
@@ -669,7 +698,7 @@ mod tests {
     #[test]
     fn test_truncate_long() {
         let result = truncate("hello world", 5);
-        assert!(result.contains("<truncated>"));
+        assert!(result.contains("<truncated 6 chars>"));
         assert!(result.starts_with("hello"));
     }
 
@@ -685,6 +714,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_env_empty() {
+        let _env = env_guard();
         std::env::remove_var("HARNESS_LLM_HEADERS");
         let h = parse_headers_env();
         assert!(h.is_empty());
@@ -692,6 +722,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_env_valid() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_HEADERS", r#"{"X-Org":"acme","X-Version":"1"}"#);
         let h = parse_headers_env();
         assert_eq!(h.get("X-Org").map(String::as_str), Some("acme"));
@@ -701,6 +732,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_env_invalid_json() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_HEADERS", "not-json");
         let h = parse_headers_env();
         assert!(h.is_empty());
@@ -709,6 +741,7 @@ mod tests {
 
     #[test]
     fn test_llm_config_from_env_defaults() {
+        let _env = env_guard();
         #[allow(clippy::float_cmp)]
         {
             let config = LlmConfig::from_env();
@@ -744,15 +777,48 @@ mod tests {
 
     #[test]
     fn test_truncate_unicode() {
-        // truncate uses byte-level slicing, so max_len refers to byte count
+        // max_len is a byte budget; the cut lands on a char boundary.
         // 'é' is 2 bytes, so index 3 captures "hé" (h=0, é=bytes 1-2)
-        assert_eq!(truncate("héllo", 3), "hé...<truncated>");
+        assert_eq!(truncate("héllo", 3), "hé...<truncated 3 chars>");
         // Length 5 captures full string (5 bytes)
         assert_eq!(truncate("hello", 5), "hello");
     }
 
     #[test]
+    fn test_truncate_utf8_boundary_mid_char_does_not_panic() {
+        // Previously: &s[..2] panicked with "not a char boundary" because the
+        // cut landed inside the 2-byte 'é'. The runner hit this on real pages
+        // full of umlauts/emoji — inside the diagnostics path that was
+        // supposed to save the run.
+        // floor_char_boundary(2) lands BEFORE 'é' (byte 1), keeping "h".
+        let result = truncate("héllo", 2);
+        assert_eq!(result, "h...<truncated 4 chars>");
+
+        // 4-byte emoji: max_len=4 lands exactly on the first 🎉 boundary? No —
+        // boundary 0 is the largest <= 4 only if 4 is a boundary; it is, so
+        // cut=4 keeps "🎉". Check with 5 instead: cut back to 4.
+        let cut_inside = truncate("🎉🎉🎉 boom", 5);
+        assert_eq!(cut_inside, "🎉...<truncated 7 chars>");
+        assert!(is_valid_utf8(&cut_inside), "result must stay valid UTF-8");
+    }
+
+    #[test]
+    fn test_truncate_utf8_exact_omitted_count() {
+        // 5 ASCII chars cut at 10 bytes → 5 omitted
+        assert_eq!(truncate("abcdefghij", 5), "abcde...<truncated 5 chars>");
+        // 3 multibyte chars cut at exactly their boundary → 0... but the
+        // guard `len <= max_len` returns the raw string first.
+        assert_eq!(truncate("ééé", 6), "ééé");
+        assert_eq!(truncate("ééé", 5), "éé...<truncated 1 chars>");
+    }
+
+    fn is_valid_utf8(s: &str) -> bool {
+        std::str::from_utf8(s.as_bytes()).is_ok()
+    }
+
+    #[test]
     fn test_parse_headers_env_non_object() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_HEADERS", "[1, 2, 3]");
         let h = parse_headers_env();
         assert!(h.is_empty());
@@ -761,6 +827,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_env_nested_values_filtered() {
+        let _env = env_guard();
         std::env::set_var(
             "HARNESS_LLM_HEADERS",
             r#"{"str":"val","num":42,"bool":true}"#,
@@ -774,12 +841,14 @@ mod tests {
 
     #[test]
     fn test_llm_config_has_default_model() {
+        let _env = env_guard();
         let config = LlmConfig::from_env();
         assert!(!config.model.is_empty());
     }
 
     #[test]
     fn test_llm_base_url_default() {
+        let _env = env_guard();
         std::env::remove_var("HARNESS_LLM_TEST_URL");
         let url = llm_base_url();
         assert_eq!(url, "http://localhost:8080");
@@ -787,6 +856,7 @@ mod tests {
 
     #[test]
     fn test_llm_base_url_custom() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_TEST_URL", "https://custom.api.com/v1");
         let url = llm_base_url();
         assert_eq!(url, "https://custom.api.com/v1");
@@ -795,6 +865,7 @@ mod tests {
 
     #[test]
     fn test_llm_base_url_trailing_slash() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_TEST_URL", "https://api.com/");
         let url = llm_base_url();
         assert_eq!(url, "https://api.com");
@@ -803,12 +874,14 @@ mod tests {
 
     #[test]
     fn test_llm_model_default() {
+        let _env = env_guard();
         std::env::remove_var("HARNESS_LLM_TEST_MODEL");
         assert_eq!(llm_model(), "deepseek");
     }
 
     #[test]
     fn test_llm_model_custom() {
+        let _env = env_guard();
         std::env::set_var("HARNESS_LLM_TEST_MODEL", "gpt-4o");
         assert_eq!(llm_model(), "gpt-4o");
         std::env::remove_var("HARNESS_LLM_TEST_MODEL");
@@ -816,6 +889,7 @@ mod tests {
 
     #[test]
     fn test_extract_usage_partial() {
+        let _env = env_guard();
         let json = serde_json::json!({
             "usage": {
                 "prompt_tokens": 50
@@ -829,6 +903,7 @@ mod tests {
 
     #[test]
     fn test_browser_headless_default() {
+        let _env = env_guard();
         std::env::remove_var("HARNESS_BROWSER_HEADLESS");
         assert!(crate::browser_headless());
     }

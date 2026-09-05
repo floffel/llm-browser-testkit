@@ -172,13 +172,13 @@ screenshot, so CI logs answer *why* the step failed instead of printing a bare
 timeout:
 
 ```
-❌ [wait] the authenticated shell — wait for app-account-shell timed out after
+  ✗ [wait] the authenticated shell — wait for app-account-shell timed out after
 30000ms: The event waited for never came — page: http://127.0.0.1:8082/auth/login
-(Immosai) — visible: "Email address ⏎ Password ⏎ Sign in"
+(Immosai) — visible: "Email address ⏎ Password ⏎ Sign in" (30.1s)
     │ url:      http://127.0.0.1:8082/auth/login
     │ title:    Immosai — Anmeldung
     │ content:  Email address  Password  ...  Invalid credentials.
-    📸 screenshot: artifacts/account__login-and-open-account__006-wait.png
+      screenshot: artifacts/account__login-and-open-account__006-wait.png
 ```
 
 - **Page state** — URL, title, visible text, and any alert/error elements
@@ -201,6 +201,38 @@ timeout:
   definitions that omit the `{content}` placeholder automatically get the
   page URL/title/content appended, so the LLM never answers "I can't
   determine that without seeing the page".
+
+## Reporting: human- and machine-readable runs
+
+All output flows through a single event stream. Every event (test/step
+started + finished, LLM call with duration/tokens/cost, budget warning) is
+rendered for humans and serialized for machines:
+
+- **Console** — level-filtered, ASCII-safe, colors only on a TTY
+  (respects `NO_COLOR`). Default shows config, per-step results with
+  durations, the run summary and the cost report. Use `-q`/`-qq` to hide
+  step results (then warnings too), or `-v`/`-vv` to add LLM call details
+  (endpoint, model, duration, tokens, cost) and step starts.
+- **NDJSON log** (`--log-file run.jsonl`) — one JSON object per event with
+  a `type` discriminator and an epoch-ms `ts` field. Lossless: untruncated
+  messages, ideal for CI artifact analysis:
+
+  ```
+  jq '. | select(.type == "step_finished" and .status == "failed")' run.jsonl
+  jq '. | select(.type == "llm_call_finished") | {endpoint, ok, duration_ms, cost}'
+  ```
+
+- **JUnit XML** (`--junit report.xml`) — one `<testcase>` per test with a
+  `<failure>` per failed step, for Jenkins/GitLab/Azure/TeamCity.
+- **Perfetto trace** (`--trace run.json`) — test/step/LLM spans in Chrome
+  Trace Event Format, viewable at https://ui.perfetto.dev.
+- **GitHub Actions** — in CI the reporter automatically emits `::error::`
+  annotations for failed steps (with the screenshot as `file=`) and appends
+  a run summary to `GITHUB_STEP_SUMMARY`.
+
+Truncation (`<truncated N chars>`) is always boundary-safe (multi-byte
+UTF-8 can never panic it) and reports how much was cut; full text is
+preserved in the NDJSON log.
 
 ## Vision assertions (screenshots)
 
@@ -397,6 +429,12 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 | `--budget-enforcement` | `hard` | Budget mode: `hard` (abort) or `soft` (warn) |
 | `--artifacts-dir` | `$HARNESS_ARTIFACTS_DIR` or `artifacts` | Directory for failure screenshots |
 | `--continue-on-failure` | off | Keep running remaining steps after a step failure (default: fail fast) |
+| `-q`, `--quiet` | off | Repeatable: hide step results (`-q`), then warnings too (`-qq`). Failures and the run summary always show |
+| `-v`, `--verbose` | off | Repeatable: show LLM call details and step starts (`-v`), then everything (`-vv`) |
+| `--log-file` | — | Write a machine-readable NDJSON event log (one JSON object per event, `type` + `ts` fields) |
+| `--junit` | — | Write a JUnit XML report for CI systems |
+| `--trace` | — | Write a Perfetto-format trace (test/step/LLM spans) |
+| `--color` | `auto` | Console colors: `auto` (TTY + `NO_COLOR` aware), `always`, `never` |
 
 CLI flags override the scenario `[config]`.
 
@@ -681,21 +719,21 @@ llm-browser-testkit run scenario.toml --max-cost 10.0 --max-tokens 1000000 --bud
 ### Sample report output
 
 ```
-═══════════════════════════════════════════════
+-------------------------------
   COST REPORT
-═══════════════════════════════════════════════
+-------------------------------
   Test: "Homepage loads" — $0.0123 | 1,234 tokens | 4 calls
     endpoint.default:   4 calls,   1,234 tokens, $0.0123
   Test: "Dashboard smoke" — $0.0891 | 4,567 tokens | 6 calls
     endpoint.vision:    2 calls,   3,000 tokens, $0.0450
     endpoint.default:   3 calls,   1,567 tokens, $0.0441
     endpoint.audit_bot:   1 call,   0 tokens, $0.0000
-───────────────────────────────────────────────
+-------------------------------
   GLOBAL SUMMARY
     Total cost:     $0.1014
     Total tokens:   5,801
     Total calls:    10
-═══════════════════════════════════════════════
+-------------------------------
 ```
 
 ## How it works

@@ -11,8 +11,10 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
+use llm_browser_testkit::reporting::{ColorMode, Level, Reporter};
 use serde_json::Value;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -122,6 +124,34 @@ enum Command {
         /// (default: fail fast — the first failed step ends the test).
         #[arg(long)]
         continue_on_failure: bool,
+
+        /// Quiet output: hide step results (`-q`), then warnings too
+        /// (`-qq`). Failures and the run summary always show.
+        #[arg(short = 'q', long, action = ArgAction::Count)]
+        quiet: u8,
+
+        /// Verbose output: show LLM calls and step starts (`-v`), then
+        /// everything (`-vv`).
+        #[arg(short = 'v', long, action = ArgAction::Count)]
+        verbose: u8,
+
+        /// Write a machine-readable `NDJSON` event log (one JSON object per
+        /// test/step/LLM-call event, each with a `type` and `ts` field).
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+
+        /// Write a `JUnit` XML report for CI systems (Jenkins, GitLab, ...).
+        #[arg(long)]
+        junit: Option<PathBuf>,
+
+        /// Write a Perfetto-format trace of test/step/LLM spans.
+        #[arg(long)]
+        trace: Option<PathBuf>,
+
+        /// Colorize console output: `auto` (default, `TTY` + `NO_COLOR` aware),
+        /// `always`, or `never`.
+        #[arg(long, default_value = "auto")]
+        color: String,
     },
 }
 
@@ -181,7 +211,29 @@ async fn main() -> anyhow::Result<()> {
             agent_port,
             artifacts_dir,
             continue_on_failure,
+            quiet,
+            verbose,
+            log_file,
+            junit,
+            trace,
+            color,
         } => {
+            let level = Level::from_flags(quiet, verbose);
+            let color_mode = match color.to_ascii_lowercase().as_str() {
+                "always" | "force" => ColorMode::Always,
+                "never" | "none" => ColorMode::Never,
+                _ => ColorMode::Auto,
+            };
+            let github = std::env::var_os("GITHUB_ACTIONS").is_some();
+            let reporter = Arc::new(Reporter::new(
+                level,
+                color_mode,
+                log_file.as_deref(),
+                junit.as_deref(),
+                trace.as_deref(),
+                github,
+            )?);
+
             let toml_content = std::fs::read_to_string(&scenario)
                 .with_context(|| format!("reading {}", scenario.display()))?;
             let mut scenario_def: llm_browser_testkit::scenario::Scenario =
@@ -301,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 .artifacts_dir
                 .clone()
                 .unwrap_or_else(|| "artifacts".to_owned());
-            eprintln!(
+            reporter.info(format!(
                 "Artifacts: {}  |  Continue on failure: {}",
                 artifacts_dir,
                 if config.continue_on_failure {
@@ -309,19 +361,22 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     "no (fail fast)"
                 }
-            );
+            ));
 
-            eprintln!("Base URL: {}", config.base_url.as_deref().unwrap_or("—"));
-            eprintln!("Endpoints: {} configured", config.endpoints.len());
+            reporter.info(format!(
+                "Base URL: {}",
+                config.base_url.as_deref().unwrap_or("-")
+            ));
+            reporter.info(format!("Endpoints: {} configured", config.endpoints.len()));
             if config.endpoints.is_empty() {
-                eprintln!(
+                reporter.info(format!(
                     "  (using default LLM: {} @ {})",
-                    config.llm_model.as_deref().unwrap_or("—"),
-                    config.llm_url.as_deref().unwrap_or("—"),
-                );
+                    config.llm_model.as_deref().unwrap_or("-"),
+                    config.llm_url.as_deref().unwrap_or("-"),
+                ));
             } else {
                 for (name, ep) in &config.endpoints {
-                    eprintln!(
+                    reporter.info(format!(
                         "  {name}: {type:?} @ {url}{fallbacks}",
                         type = ep.endpoint_type,
                         url = ep.url.as_deref().unwrap_or("(subprocess)"),
@@ -330,10 +385,10 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             format!("  ->  fallbacks: {}", ep.fallbacks.join(", "))
                         },
-                    );
+                    ));
                 }
             }
-            eprintln!(
+            reporter.info(format!(
                 "Browser: {} ({}x{})",
                 if config.browser_headless.unwrap_or(true) {
                     "headless"
@@ -342,30 +397,30 @@ async fn main() -> anyhow::Result<()> {
                 },
                 config.viewport_width.unwrap(),
                 config.viewport_height.unwrap(),
-            );
-            eprintln!(
+            ));
+            reporter.info(format!(
                 "Start URL: {}",
                 config.start_url.as_deref().unwrap_or("/dashboard"),
-            );
-            eprintln!(
+            ));
+            reporter.info(format!(
                 "Tests: {}  Definitions: {}",
                 scenario_def.test.len(),
                 scenario_def.definitions.len(),
-            );
+            ));
             if let Some(ref global_budget) = config.budgets.global {
                 if let Some(cost) = global_budget.max_cost {
-                    eprintln!("Budget (global): max ${cost:.2}");
+                    reporter.info(format!("Budget (global): max ${cost:.2}"));
                 }
                 if let Some(tokens) = global_budget.max_tokens {
-                    eprintln!("Budget (global): max {tokens} tokens");
+                    reporter.info(format!("Budget (global): max {tokens} tokens"));
                 }
             }
             if let Some(ref per_test) = config.budgets.per_test_default {
                 if let Some(cost) = per_test.max_cost {
-                    eprintln!("Budget (per-test default): max ${cost:.2}");
+                    reporter.info(format!("Budget (per-test default): max ${cost:.2}"));
                 }
                 if let Some(tokens) = per_test.max_tokens {
-                    eprintln!("Budget (per-test default): max {tokens} tokens");
+                    reporter.info(format!("Budget (per-test default): max {tokens} tokens"));
                 }
             }
 
@@ -389,7 +444,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     expanded_tests = expanded;
-                    eprintln!(
+                    reporter.info(format!(
                         "Viewport matrix: {} variants per test ({})",
                         matrix.viewports.len(),
                         matrix
@@ -398,26 +453,19 @@ async fn main() -> anyhow::Result<()> {
                             .map(|v| format!("{}={}x{}", v.name, v.width, v.height))
                             .collect::<Vec<_>>()
                             .join(", "),
-                    );
+                    ));
                 }
             }
 
-            let runner = llm_browser_testkit::runner::ScenarioRunner::new(config, definitions);
+            let runner = llm_browser_testkit::runner::ScenarioRunner::with_reporter(
+                config,
+                definitions,
+                Arc::clone(&reporter),
+            );
 
             let report = runner.run(&expanded_tests)?;
 
-            eprintln!("\n═══════════════════════════════════════");
-            eprintln!(
-                "  Tests:  ✅ {passed} passed   ❌ {failed} failed",
-                passed = report.tests_passed,
-                failed = report.tests_failed,
-            );
-            eprintln!(
-                "  Steps:  ✅ {passed} passed   ❌ {failed} failed   ⏭️  {skipped} skipped",
-                passed = report.passed,
-                failed = report.failed,
-                skipped = report.skipped,
-            );
+            reporter.finish()?;
 
             // Print cost report
             llm_browser_testkit::reporting::print_report(
@@ -437,6 +485,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use std::path::PathBuf;
 
     #[test]
     fn test_cli_run_subcommand_exists() {
@@ -496,5 +545,59 @@ mod tests {
         let cmd = super::Cli::command();
         let matches = cmd.try_get_matches_from(["llm-browser-testkit", "run", "test.toml"]);
         assert!(matches.is_ok());
+    }
+
+    #[test]
+    fn test_cli_run_reporting_flags() {
+        let cmd = super::Cli::command();
+        let matches = cmd
+            .try_get_matches_from([
+                "llm-browser-testkit",
+                "run",
+                "test.toml",
+                "-v",
+                "-q",
+                "--log-file",
+                "run.jsonl",
+                "--junit",
+                "report.xml",
+                "--trace",
+                "trace.json",
+                "--color",
+                "never",
+            ])
+            .unwrap();
+        let sub = matches.subcommand_matches("run").unwrap();
+        assert_eq!(sub.get_count("quiet"), 1);
+        assert_eq!(sub.get_count("verbose"), 1);
+        assert_eq!(
+            sub.get_one::<String>("color").map(String::as_str),
+            Some("never")
+        );
+        assert_eq!(
+            sub.get_one::<PathBuf>("log_file")
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some("run.jsonl".to_owned())
+        );
+        assert_eq!(
+            sub.get_one::<PathBuf>("junit")
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some("report.xml".to_owned())
+        );
+        assert_eq!(
+            sub.get_one::<PathBuf>("trace")
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some("trace.json".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_cli_run_quiet_counted() {
+        let cmd = super::Cli::command();
+        let matches = cmd
+            .try_get_matches_from(["llm-browser-testkit", "run", "t.toml", "-qq"])
+            .unwrap();
+        let sub = matches.subcommand_matches("run").unwrap();
+        assert_eq!(sub.get_count("quiet"), 2);
     }
 }

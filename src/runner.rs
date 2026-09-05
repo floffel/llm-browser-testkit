@@ -8,12 +8,14 @@ use headless_chrome::{Browser, LaunchOptions, Tab};
 
 use crate::a2a::A2aClient;
 use crate::budgets::{BudgetStatus, BudgetTracker};
-use crate::costs::UsageTracker;
+use crate::costs::{calculate_llm_cost, UsageTracker};
 use crate::diagnostics;
 use crate::endpoints::{EndpointRegistry, ResolvedEndpoint, TaskType};
+use crate::events::TestEvent;
 use crate::llm_chat_vision_with_usage_chain;
 use crate::llm_chat_with_usage_chain;
 use crate::mcp_client::McpClient;
+use crate::reporting::Reporter;
 use crate::scenario::{AssertDefinition, ScenarioConfig, TestGroup, TestStep};
 use crate::selectors::{sanitize_selector, selector_is_useless, validate_selector};
 use crate::truncate;
@@ -212,6 +214,10 @@ pub struct ScenarioRunner {
     budgets: BudgetTracker,
     /// Directory for failure artifacts (screenshots).
     artifacts_dir: PathBuf,
+    /// Event sink for test reporting (console, `JSONL`, `JUnit`, trace).
+    reporter: Arc<Reporter>,
+    /// The test + step index currently executing, for LLM-call events.
+    current_step: std::cell::RefCell<Option<(String, u32)>>,
 }
 
 /// Aggregated results from a scenario run.
@@ -243,15 +249,7 @@ pub struct StepResult {
 }
 
 /// Outcome for a single step.
-#[derive(Debug, PartialEq, Eq)]
-pub enum StepStatus {
-    /// Step executed successfully and all assertions passed.
-    Passed,
-    /// Step execution or assertion failed.
-    Failed,
-    /// Step was skipped.
-    Skipped,
-}
+pub use crate::events::StepStatus;
 
 /// Predefined assertion preset definition.
 struct AssertPreset {
@@ -306,6 +304,17 @@ impl ScenarioRunner {
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(scenario_config: ScenarioConfig, definitions: Vec<AssertDefinition>) -> Self {
+        Self::with_reporter(scenario_config, definitions, Arc::new(Reporter::default()))
+    }
+
+    /// Creates a runner that reports run events through the given reporter.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn with_reporter(
+        scenario_config: ScenarioConfig,
+        definitions: Vec<AssertDefinition>,
+        reporter: Arc<Reporter>,
+    ) -> Self {
         let llm = LlmConfig {
             url: scenario_config
                 .llm_url
@@ -353,6 +362,18 @@ impl ScenarioRunner {
                     .artifacts_dir
                     .unwrap_or_else(|| "artifacts".to_owned()),
             ),
+            reporter,
+            current_step: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Emits an event; a sink failure degrades to a console warning so a
+    /// broken log file can never mask the run itself.
+    fn emit_event(&self, event: &TestEvent) {
+        if let Err(err) = self.reporter.emit(event) {
+            use std::io::Write as _;
+            let mut out = std::io::stderr().lock();
+            let _ = out.write_fmt(format_args!("  ! failed to record event: {err}\n"));
         }
     }
 
@@ -373,14 +394,28 @@ impl ScenarioRunner {
     /// # Errors
     ///
     /// Returns an error if the browser fails to launch.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub fn run(&self, tests: &[TestGroup]) -> anyhow::Result<RunReport> {
         let mut report = RunReport::default();
 
         if tests.is_empty() {
-            eprintln!("No tests defined in scenario.");
+            self.reporter.warn("No tests defined in scenario.");
+            self.emit_event(&TestEvent::RunFinished {
+                tests_passed: 0,
+                tests_failed: 0,
+                steps_passed: 0,
+                steps_failed: 0,
+                steps_skipped: 0,
+                total_cost: 0.0,
+                total_tokens: 0,
+                total_calls: 0,
+            });
             return Ok(report);
         }
+
+        self.emit_event(&TestEvent::RunStarted {
+            total_tests: tests.len() as u32,
+        });
 
         let browser_headless = self.config.browser_headless.unwrap_or(true);
 
@@ -417,7 +452,8 @@ impl ScenarioRunner {
         #[cfg(not(feature = "mcp-server"))]
         if let Some(mcp_cfg) = &self.config.mcp_server {
             if mcp_cfg.enabled {
-                eprintln!("  ⚠️  MCP server configured but 'mcp-server' feature not enabled");
+                self.reporter
+                    .warn("MCP server configured but 'mcp-server' feature not enabled");
             }
         }
 
@@ -432,26 +468,39 @@ impl ScenarioRunner {
         #[cfg(not(feature = "a2a-server"))]
         if let Some(a2a_cfg) = &self.config.a2a_server {
             if a2a_cfg.enabled {
-                eprintln!("  ⚠️  A2A server configured but 'a2a-server' feature not enabled");
+                self.reporter
+                    .warn("A2A server configured but 'a2a-server' feature not enabled");
             }
         }
 
         for test in tests {
-            eprintln!("\n╔══════════════════════════════");
-            eprintln!("║  Test: {}", test.name);
-            eprintln!("╚══════════════════════════════");
+            self.emit_event(&TestEvent::TestStarted {
+                test: test.name.clone(),
+            });
 
             self.usage.reset_per_test();
 
+            let test_started = Instant::now();
             let test_result = self.run_test(test, &tab);
+            let duration_ms = test_started.elapsed().as_millis() as u64;
+            let usage = self.usage.current_test_snapshot();
             self.usage.commit_test(&test.name);
+
+            self.emit_event(&TestEvent::TestFinished {
+                test: test.name.clone(),
+                passed: test_result.passed,
+                failed: test_result.failed,
+                skipped: test_result.skipped,
+                duration_ms,
+                cost: usage.total_cost,
+                tokens: usage.total_tokens,
+                calls: usage.total_calls,
+            });
 
             if test_result.failed == 0 && test_result.total > 0 {
                 report.tests_passed += 1;
-                eprintln!("  Test ✅ Passed");
             } else if test_result.total > 0 {
                 report.tests_failed += 1;
-                eprintln!("  Test ❌ Failed");
             }
 
             report.passed += test_result.passed;
@@ -460,10 +509,22 @@ impl ScenarioRunner {
             report.details.extend(test_result.details);
         }
 
+        let global = self.usage.global_snapshot();
+        self.emit_event(&TestEvent::RunFinished {
+            tests_passed: report.tests_passed,
+            tests_failed: report.tests_failed,
+            steps_passed: report.passed,
+            steps_failed: report.failed,
+            steps_skipped: report.skipped,
+            total_cost: global.total_cost,
+            total_tokens: global.total_tokens,
+            total_calls: global.total_calls,
+        });
+
         Ok(report)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     fn run_test(&self, test: &TestGroup, tab: &Tab) -> TestRunResult {
         let base_url = test
             .base_url
@@ -493,7 +554,7 @@ impl ScenarioRunner {
 
         if auto_navigate {
             let full_url = resolve_url(&start_url, &base_url);
-            eprintln!("  → auto-navigate: {full_url}");
+            self.reporter.debug(format!("auto-navigate: {full_url}"));
             let _ = tab.navigate_to(&full_url);
             let _ = tab.wait_until_navigated();
             std::thread::sleep(Duration::from_secs(4));
@@ -510,6 +571,15 @@ impl ScenarioRunner {
                 | TestStep::Type { wait_after_ms, .. } => *wait_after_ms,
                 _ => None,
             };
+
+            self.current_step
+                .replace(Some((test.name.clone(), step_index as u32)));
+            self.emit_event(&TestEvent::StepStarted {
+                test: test.name.clone(),
+                index: step_index as u32,
+                label: step_label(step),
+            });
+            let step_started = Instant::now();
 
             let mut step_result = match step {
                 TestStep::Navigate { url, .. } => {
@@ -592,7 +662,7 @@ impl ScenarioRunner {
             // Failure diagnostics: capture the page state and a screenshot so
             // CI logs say WHAT the page looked like when the step failed,
             // instead of a bare "timed out: The event waited for never came".
-            if step_result.status == StepStatus::Failed {
+            let (diagnostics_block, screenshot_path) = if step_result.status == StepStatus::Failed {
                 let state = diagnostics::capture(tab);
                 let screenshot = diagnostics::save_screenshot(
                     tab,
@@ -607,24 +677,23 @@ impl ScenarioRunner {
                     base = step_result.message,
                     excerpt = diagnostics::inline_excerpt(&state),
                 );
-                eprintln!(
-                    "{}",
-                    diagnostics::full_context(&state, screenshot.as_deref())
-                );
-            }
+                (Some(diagnostics::full_context(&state)), screenshot)
+            } else {
+                (None, None)
+            };
 
-            eprintln!(
-                "    {} {} — {}",
-                if step_result.status == StepStatus::Passed {
-                    "✅"
-                } else if step_result.status == StepStatus::Failed {
-                    "❌"
-                } else {
-                    "⏭️"
-                },
-                step_result.name,
-                step_result.message,
-            );
+            let duration_ms = step_started.elapsed().as_millis() as u64;
+            self.emit_event(&TestEvent::StepFinished {
+                test: test.name.clone(),
+                index: step_index as u32,
+                label: step_result.name.clone(),
+                status: step_result.status,
+                duration_ms,
+                message: step_result.message.clone(),
+                diagnostics: diagnostics_block,
+                screenshot: screenshot_path,
+            });
+            self.current_step.replace(None);
 
             match step_result.status {
                 StepStatus::Passed => result.passed += 1,
@@ -639,17 +708,32 @@ impl ScenarioRunner {
                 && !self.config.continue_on_failure
                 && step_index + 1 < test.steps.len()
             {
-                eprintln!(
-                    "      ⏭️  failing fast: {} remaining step(s) skipped (set continue_on_failure = true in [config] to disable)",
-                    test.steps.len() - step_index - 1
-                );
-                for skipped in &test.steps[step_index + 1..] {
+                self.emit_event(&TestEvent::Warning {
+                    message: format!(
+                        "failing fast: {} remaining step(s) skipped (set continue_on_failure = true in [config] to disable)",
+                        test.steps.len() - step_index - 1
+                    ),
+                });
+                for (offset, skipped) in test.steps[step_index + 1..].iter().enumerate() {
+                    let skipped_index = step_index + 1 + offset;
+                    let label = step_label(skipped);
                     result.total += 1;
                     result.skipped += 1;
-                    eprintln!(
-                        "    ⏭️  {} — skipped: previous step failed",
-                        step_label(skipped)
-                    );
+                    self.emit_event(&TestEvent::StepStarted {
+                        test: test.name.clone(),
+                        index: skipped_index as u32,
+                        label: label.clone(),
+                    });
+                    self.emit_event(&TestEvent::StepFinished {
+                        test: test.name.clone(),
+                        index: skipped_index as u32,
+                        label,
+                        status: StepStatus::Skipped,
+                        duration_ms: 0,
+                        message: "skipped: previous step failed".into(),
+                        diagnostics: None,
+                        screenshot: None,
+                    });
                     result.details.push(StepResult {
                         name: step_label(skipped),
                         status: StepStatus::Skipped,
@@ -671,7 +755,9 @@ impl ScenarioRunner {
             );
             match budget_status {
                 BudgetStatus::HardExceeded { message, .. } => {
-                    crate::reporting::print_budget_error(&message);
+                    self.emit_event(&TestEvent::Warning {
+                        message: format!("budget exceeded: {message}"),
+                    });
                     result.details.push(StepResult {
                         name: "[budget]".into(),
                         status: StepStatus::Failed,
@@ -681,7 +767,9 @@ impl ScenarioRunner {
                     return result;
                 }
                 BudgetStatus::SoftExceeded { message, .. } => {
-                    crate::reporting::print_budget_warning(&message);
+                    self.emit_event(&TestEvent::Warning {
+                        message: format!("budget warning: {message}"),
+                    });
                 }
                 BudgetStatus::Ok => {}
             }
@@ -720,9 +808,10 @@ impl ScenarioRunner {
             display_feature: None,
             device_posture: None,
         };
-        eprintln!("      ↻ viewport: {width}x{height}");
+        self.reporter.debug(format!("viewport: {width}x{height}"));
         if let Err(e) = tab.call_method(params) {
-            eprintln!("      ⚠️  viewport switch to {width}x{height} failed: {e}");
+            self.reporter
+                .warn(format!("viewport switch to {width}x{height} failed: {e}"));
         }
     }
 
@@ -1214,14 +1303,15 @@ impl ScenarioRunner {
             )
         };
 
-        eprintln!("      assert: {name} (custom preset)");
+        self.reporter
+            .debug(format!("assert: {name} (custom preset)"));
 
         let chain = self
             .endpoints
             .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Assertion);
         let sys = system.to_owned();
 
-        let response = self.llm_call_chain(&chain, &sys, &user_prompt, image);
+        let response = self.llm_call_chain(&chain, &sys, &user_prompt, image, "assertion");
 
         response.map_or_else(
             |e| StepResult {
@@ -1301,14 +1391,14 @@ impl ScenarioRunner {
             )
         };
 
-        eprintln!("      assert: {preset_name}");
+        self.reporter.debug(format!("assert: {preset_name}"));
 
         let chain = self
             .endpoints
             .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Assertion);
         let sys = preset.system.to_owned();
 
-        let response = self.llm_call_chain(&chain, &sys, &user_prompt, image);
+        let response = self.llm_call_chain(&chain, &sys, &user_prompt, image, "assertion");
 
         response.map_or_else(
             |e| StepResult {
@@ -1351,7 +1441,8 @@ impl ScenarioRunner {
     /// safe to run on every page × viewport variant.
     fn run_layout_preset(&self, tab: &Tab) -> StepResult {
         let name = "[assert] layout_no_issues".to_owned();
-        eprintln!("      assert: layout_no_issues (DOM layout scan)");
+        self.reporter
+            .debug("assert: layout_no_issues (DOM layout scan)");
         let js = LAYOUT_SCAN_JS.replace(
             "__IGNORE_CLASSES__",
             &serde_json::to_string(&self.config.layout_ignore_classes)
@@ -1428,14 +1519,14 @@ impl ScenarioRunner {
             );
         }
 
-        eprintln!("      custom assert");
+        self.reporter.debug("custom assert");
 
         let chain = self
             .endpoints
             .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Assertion);
         let sys = system.to_owned();
 
-        let response = self.llm_call_chain(&chain, &sys, &user, image);
+        let response = self.llm_call_chain(&chain, &sys, &user, image, "assertion");
 
         response.map_or_else(
             |e| StepResult {
@@ -1544,7 +1635,7 @@ impl ScenarioRunner {
             };
         }
 
-        eprintln!("      → agent {agent_name}: {task}");
+        self.reporter.debug(format!("agent {agent_name}: {task}"));
 
         let url = ep.url.clone();
         let client = A2aClient::new(&url, self.timeout);
@@ -1619,7 +1710,8 @@ impl ScenarioRunner {
             };
         }
 
-        eprintln!("      → mcp {server_name} {tool_name}");
+        self.reporter
+            .debug(format!("mcp {server_name} {tool_name}"));
 
         let args_val = args.cloned().unwrap_or(serde_json::Value::Null);
 
@@ -1701,12 +1793,17 @@ impl ScenarioRunner {
     /// the first endpoint that answers wins. Returns the response together
     /// with the chain index of the answering endpoint (0 = primary) so the
     /// caller can attribute usage to the correct endpoint.
+    ///
+    /// Emits an `LlmCallStarted`/`LlmCallFinished` event pair so the report
+    /// shows duration, tokens, cost and the answering endpoint per call.
+    #[allow(clippy::cast_possible_truncation)]
     fn llm_call_chain(
         &self,
         chain: &[&ResolvedEndpoint],
         system: &str,
         user: &str,
         image: Option<&str>,
+        purpose: &str,
     ) -> Result<(crate::costs::LlmResponse, usize), String> {
         if chain.is_empty() {
             return Err("empty LLM endpoint chain".into());
@@ -1716,11 +1813,28 @@ impl ScenarioRunner {
             .iter()
             .map(|e| self.build_llm_for_endpoint(e))
             .collect();
+
+        let (test, index) = self
+            .current_step
+            .borrow()
+            .as_ref()
+            .map_or_else(|| ("-".to_owned(), 0), |(t, i)| (t.clone(), *i));
+        let primary_endpoint = chain[0].name.clone();
+        let primary_model = primary.model.clone();
+        self.emit_event(&TestEvent::LlmCallStarted {
+            test: test.clone(),
+            index,
+            endpoint: primary_endpoint.clone(),
+            model: primary_model.clone(),
+            purpose: purpose.to_owned(),
+        });
+
+        let started = Instant::now();
         let sys = system.to_owned();
         let user = user.to_owned();
         let image = image.map(str::to_owned);
 
-        std::thread::spawn(move || {
+        let result = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1737,7 +1851,53 @@ impl ScenarioRunner {
             rt.block_on(call)
         })
         .join()
-        .unwrap()
+        .unwrap();
+
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok((lr, idx)) => {
+                let cost = calculate_llm_cost(
+                    chain[idx],
+                    lr.usage.prompt_tokens,
+                    lr.usage.completion_tokens,
+                );
+                let answering = chain[idx].name.clone();
+                let model = chain[idx]
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| primary_model.clone());
+                self.emit_event(&TestEvent::LlmCallFinished {
+                    test,
+                    index,
+                    endpoint: answering,
+                    model,
+                    purpose: purpose.to_owned(),
+                    ok: true,
+                    duration_ms,
+                    input_tokens: lr.usage.prompt_tokens,
+                    output_tokens: lr.usage.completion_tokens,
+                    cost,
+                    error: None,
+                });
+                Ok((lr, idx))
+            }
+            Err(e) => {
+                self.emit_event(&TestEvent::LlmCallFinished {
+                    test,
+                    index,
+                    endpoint: primary_endpoint,
+                    model: primary_model,
+                    purpose: purpose.to_owned(),
+                    ok: false,
+                    duration_ms,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost: 0.0,
+                    error: Some(e.clone()),
+                });
+                Err(e)
+            }
+        }
     }
 
     /// Resolves a CSS selector for the target element. Uses the explicit
@@ -1793,14 +1953,14 @@ impl ScenarioRunner {
             target,
         );
 
-        eprintln!("      LLM targeting: {target}");
+        self.reporter.debug(format!("LLM targeting: {target}"));
 
         let chain = self
             .endpoints
             .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Targeting);
         let sys = system.to_owned();
 
-        let call_llm = |prompt: &str| self.llm_call_chain(&chain, &sys, prompt, None);
+        let call_llm = |prompt: &str| self.llm_call_chain(&chain, &sys, prompt, None, "targeting");
 
         let first = call_llm(&user);
         let (lr, idx) = match first {
@@ -1816,7 +1976,7 @@ impl ScenarioRunner {
             lr.usage.completion_tokens,
         );
         let clean = sanitize_selector(&lr.content);
-        eprintln!("      resolved selector: {clean}");
+        self.reporter.debug(format!("resolved selector: {clean}"));
 
         if selector_is_useless(&clean) {
             return Err(format!(
@@ -1833,9 +1993,9 @@ impl ScenarioRunner {
         if !selector_matches(tab, &clean).unwrap_or(false) {
             // One retry with feedback: flaky models occasionally invent a
             // selector that does not exist on the page.
-            eprintln!(
-                "      selector {clean} matches nothing — retrying LLM targeting with feedback"
-            );
+            self.reporter.warn(format!(
+                "selector {clean} matches nothing — retrying LLM targeting with feedback"
+            ));
             let second = call_llm(&retry_user);
             let (lr2, idx2) = match second {
                 Ok(lr2) => lr2,
@@ -1852,7 +2012,8 @@ impl ScenarioRunner {
                 lr2.usage.completion_tokens,
             );
             let clean2 = sanitize_selector(&lr2.content);
-            eprintln!("      resolved selector (retry): {clean2}");
+            self.reporter
+                .debug(format!("resolved selector (retry): {clean2}"));
             if selector_is_useless(&clean2) {
                 return Err(format!(
                     "LLM element targeting failed: selector {clean:?} matched nothing; the retry returned no usable selector for {target:?} (got {raw:?}). Page excerpt: {excerpt}",

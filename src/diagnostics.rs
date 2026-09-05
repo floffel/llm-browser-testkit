@@ -105,9 +105,13 @@ pub fn inline_excerpt(state: &PageState) -> String {
     out
 }
 
-/// Multi-line diagnostics block printed to stderr after a step failure.
+/// Multi-line diagnostics block (URL, title, alerts, visible text) shown
+/// after a step failure.
+///
+/// The screenshot path travels separately in the `StepFinished` event so
+/// sinks can render it in their own format.
 #[must_use]
-pub fn full_context(state: &PageState, screenshot: Option<&str>) -> String {
+pub fn full_context(state: &PageState) -> String {
     let mut lines = Vec::new();
     lines.push(format!("    │ url:      {}", state.url));
     lines.push(format!("    │ title:    {}", state.title));
@@ -119,9 +123,6 @@ pub fn full_context(state: &PageState, screenshot: Option<&str>) -> String {
     let trimmed = state.visible_text.trim();
     if !trimmed.is_empty() {
         lines.push(format!("    │ content:  {trimmed}"));
-    }
-    if let Some(path) = screenshot {
-        lines.push(format!("    📸 screenshot: {path}"));
     }
     lines.join("\n")
 }
@@ -213,11 +214,11 @@ mod tests {
     }
 
     #[test]
-    fn test_full_context_lists_alerts_and_screenshot() {
-        let s = full_context(&state(), Some("artifacts/x.png"));
+    fn test_full_context_lists_alerts() {
+        let s = full_context(&state());
         assert!(s.contains("url:"));
         assert!(s.contains("alert:"));
-        assert!(s.contains("screenshot: artifacts/x.png"));
+        assert!(s.contains("content:"));
     }
 
     #[test]
