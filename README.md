@@ -28,31 +28,72 @@ llm-browser-testkit run smoke.toml
 
 ## Quick start
 
+Everything you need for a first green run — copy-paste, no prior setup:
+
 ```bash
-# Install
+# 1. Install the CLI
 cargo install llm-browser-testkit
 
-# Set your LLM credentials (OpenAI-compatible API)
+# 2. Point it at any OpenAI-compatible API
 export HARNESS_LLM_TEST_URL=https://api.openai.com
 export HARNESS_LLM_TEST_MODEL=gpt-4o-mini
 export HARNESS_LLM_API_KEY=sk-...
 
-# Run the built-in example (tests example.com — no account needed)
-llm-browser-testkit run examples/smoke.toml
+# 3. Describe one test in a tiny TOML file (example.com — no account needed)
+cat > hello.toml <<'EOF'
+[config]
+base_url = "https://example.com"
+start_url = "/"
+
+[[test]]
+name = "Homepage loads"
+
+[[test.steps]]
+kind = "navigate"
+url = "/"
+
+[[test.steps]]
+kind = "assert"
+preset = "no_error_on_page"
+EOF
+
+# 4. Run it — Chrome runs headless, the LLM checks the page
+llm-browser-testkit run hello.toml
+```
+
+Example output:
+
+```
+Test: Homepage loads — passed (6.2s, $0.0005, 138 tokens, 1 calls, 2+0+0 steps)
+run passed: tests 1 passed, 0 failed | steps 2 passed, 0 failed, 0 skipped | $0.0005 | 138 tokens | 1 calls
 ```
 
 ## Write your first test
 
-```toml
-# hello.toml
-[config]
-base_url = "https://example.com"
-timeout_secs = 30
-start_url = "/"
+The quick-start `hello.toml` is the smallest useful scenario. Its three
+blocks:
 
+- `[config]` — `base_url` is the app under test; `start_url` is where Chrome
+  loads first.
+- `[[test]]` — one named test, built from `[[test.steps]]` that run top to
+  bottom.
+- Steps — every step has a `kind`: `navigate` opens a URL relative to
+  `base_url`; `assert` sends the page to the LLM and expects `PASS`/`FAIL`.
+  `preset` picks a built-in check (`no_error_on_page` = no errors, stack
+  traces, or broken UI).
+
+Reusable checks go into `[[definitions]]` — name a preset or prompt once and
+reference it from any assertion:
+
+```toml
 [[definitions]]
 name = "no_errors"
 preset = "no_error_on_page"
+
+[[definitions]]
+name = "example_domain_visible"
+preset = "text_visible"
+assert_text = "Example Domain"
 
 [[test]]
 name = "Homepage loads"
@@ -64,6 +105,10 @@ url = "/"
 [[test.steps]]
 kind = "assert"
 definition = "no_errors"
+
+[[test.steps]]
+kind = "assert"
+definition = "example_domain_visible"
 ```
 
 Run it:
