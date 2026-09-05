@@ -29,6 +29,7 @@ fn config(url: &str) -> LlmConfig {
         temperature: 0.0,
         thinking: None,
         model_params: HashMap::new(),
+        max_attempts: 3,
     }
 }
 

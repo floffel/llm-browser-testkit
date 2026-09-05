@@ -48,6 +48,25 @@ enum Command {
         #[arg(long, env = "HARNESS_LLM_API_KEY")]
         llm_api_key: Option<String>,
 
+        /// Fallback LLM base URL (default: `HARNESS_LLM_FALLBACK_URL`).
+        /// When set, every LLM call first tries the primary endpoint
+        /// (`HARNESS_LLM_TEST_URL`) with its own retry budget, then this
+        /// fallback endpoint. Useful for pairing a cheap primary model with
+        /// a more powerful/expensive fallback that is only billed when the
+        /// primary fails. Only applies when the scenario declares no
+        /// `[config.endpoints]` table — with a table, use per-endpoint
+        /// `fallbacks = [...]` instead.
+        #[arg(long, env = "HARNESS_LLM_FALLBACK_URL")]
+        llm_fallback_url: Option<String>,
+
+        /// Fallback LLM model name (default: `HARNESS_LLM_FALLBACK_MODEL`).
+        #[arg(long, env = "HARNESS_LLM_FALLBACK_MODEL")]
+        llm_fallback_model: Option<String>,
+
+        /// Fallback LLM API key (default: `HARNESS_LLM_FALLBACK_API_KEY`).
+        #[arg(long, env = "HARNESS_LLM_FALLBACK_API_KEY")]
+        llm_fallback_api_key: Option<String>,
+
         /// Custom HTTP header `Name:Value`
         /// (repeatable, e.g. `--llm-header "X-Org:acme"`).
         #[arg(long = "llm-header", value_parser = parse_header)]
@@ -140,6 +159,9 @@ async fn main() -> anyhow::Result<()> {
             llm_url,
             llm_model,
             llm_api_key,
+            llm_fallback_url,
+            llm_fallback_model,
+            llm_fallback_api_key,
             llm_headers,
             model_params,
             headless,
@@ -166,6 +188,41 @@ async fn main() -> anyhow::Result<()> {
             config.llm_url = llm_url.or(config.llm_url);
             config.llm_model = llm_model.or(config.llm_model);
             config.llm_api_key = llm_api_key.or(config.llm_api_key);
+            // Fallback endpoint: only meaningful when the scenario declares
+            // no [config.endpoints] table (with a table, per-endpoint
+            // `fallbacks = [...]` is the declarative form). Synthesize a
+            // two-endpoint table here so CLI/env fallback settings behave
+            // exactly like the declarative chain.
+            if let Some(fb_url) = llm_fallback_url {
+                if config.endpoints.is_empty() {
+                    let mut endpoints = std::collections::HashMap::new();
+                    endpoints.insert(
+                        "default".to_owned(),
+                        llm_browser_testkit::scenario::EndpointConfig {
+                            endpoint_type: llm_browser_testkit::scenario::EndpointType::Llm,
+                            url: config.llm_url.clone(),
+                            model: config.llm_model.clone(),
+                            api_key: config.llm_api_key.clone(),
+                            headers: config.llm_headers.clone(),
+                            default_for: vec!["targeting".to_owned(), "assertion".to_owned()],
+                            fallbacks: vec!["fallback".to_owned()],
+                            ..Default::default()
+                        },
+                    );
+                    endpoints.insert(
+                        "fallback".to_owned(),
+                        llm_browser_testkit::scenario::EndpointConfig {
+                            endpoint_type: llm_browser_testkit::scenario::EndpointType::Llm,
+                            url: Some(fb_url),
+                            model: llm_fallback_model,
+                            api_key: llm_fallback_api_key,
+                            default_for: Vec::new(),
+                            ..Default::default()
+                        },
+                    );
+                    config.endpoints = endpoints;
+                }
+            }
             if !llm_headers.is_empty() {
                 let mut headers = config.llm_headers;
                 for (k, v) in llm_headers {
@@ -259,9 +316,14 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 for (name, ep) in &config.endpoints {
                     eprintln!(
-                        "  {name}: {type:?} @ {url}",
+                        "  {name}: {type:?} @ {url}{fallbacks}",
                         type = ep.endpoint_type,
-                        url = ep.url.as_deref().unwrap_or("(subprocess)")
+                        url = ep.url.as_deref().unwrap_or("(subprocess)"),
+                        fallbacks = if ep.fallbacks.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  ->  fallbacks: {}", ep.fallbacks.join(", "))
+                        },
                     );
                 }
             }
@@ -394,6 +456,12 @@ mod tests {
             "X-Org:acme",
             "--model-param",
             "effort=high",
+            "--llm-fallback-url",
+            "https://fallback.example.com",
+            "--llm-fallback-model",
+            "gpt-4o",
+            "--llm-fallback-api-key",
+            "sk-fallback",
             "--base-url",
             "https://myapp.com",
             "--headless",

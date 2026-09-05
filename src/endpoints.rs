@@ -53,6 +53,12 @@ pub struct ResolvedEndpoint {
     pub output_price_per_1m: f64,
     /// Flat cost per call.
     pub per_call_price: f64,
+    /// Retry budget for a single chat completion (default 3; global env
+    /// override `HARNESS_LLM_CALL_ATTEMPTS`).
+    pub max_attempts: u32,
+    /// Ordered names of fallback endpoints tried when this endpoint
+    /// exhausts its attempts (LLM endpoints only).
+    pub fallbacks: Vec<String>,
 }
 
 impl ResolvedEndpoint {
@@ -72,6 +78,8 @@ impl ResolvedEndpoint {
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
             per_call_price: 0.0,
+            max_attempts: crate::default_llm_attempts(),
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -112,6 +120,8 @@ impl EndpointRegistry {
                     input_price_per_1m: 0.0,
                     output_price_per_1m: 0.0,
                     per_call_price: 0.0,
+                    max_attempts: llm.max_attempts,
+                    fallbacks: Vec::new(),
                 });
             let mut map = HashMap::new();
             let mut default_for = HashMap::new();
@@ -150,6 +160,8 @@ impl EndpointRegistry {
                 input_price_per_1m: ec.pricing.as_ref().map_or(0.0, |p| p.input_per_1m_tokens),
                 output_price_per_1m: ec.pricing.as_ref().map_or(0.0, |p| p.output_per_1m_tokens),
                 per_call_price: ec.pricing.as_ref().map_or(0.0, |p| p.per_call),
+                max_attempts: ec.max_attempts.unwrap_or_else(crate::default_llm_attempts),
+                fallbacks: ec.fallbacks.clone(),
             };
 
             for df in &ec.default_for {
@@ -202,6 +214,40 @@ impl EndpointRegistry {
             }
         }
         self.resolve_for_task(task)
+    }
+
+    /// Resolves the ordered call chain for a task: the primary endpoint
+    /// followed by its `fallbacks` (LLM endpoints only, deduplicated,
+    /// cycle-guarded, max 8 hops). Every LLM call goes through this chain —
+    /// the primary endpoint gets its own `max_attempts` retry budget, then
+    /// each fallback in turn, until one answers.
+    ///
+    /// Example: a cheap primary (`default`) with a more powerful fallback
+    /// (`pro`) can be declared as
+    /// `fallbacks = ["pro"]` on the `default` endpoint.
+    #[must_use]
+    pub fn resolve_chain(&self, name: Option<&str>, task: TaskType) -> Vec<&ResolvedEndpoint> {
+        let primary = self.resolve(name, task);
+        let mut chain: Vec<&ResolvedEndpoint> = vec![primary];
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::from([primary.name.as_str()]);
+        let mut cursor = primary;
+        for _ in 0..8 {
+            let next = cursor.fallbacks.iter().find_map(|fb| {
+                let ep = self.endpoints.get(fb)?;
+                (ep.endpoint_type == EndpointType::Llm && !seen.contains(ep.name.as_str()))
+                    .then_some(ep)
+            });
+            match next {
+                Some(ep) => {
+                    seen.insert(ep.name.as_str());
+                    chain.push(ep);
+                    cursor = ep;
+                }
+                None => break,
+            }
+        }
+        chain
     }
 
     /// Returns the number of configured endpoints.
@@ -297,6 +343,94 @@ mod tests {
         let registry = EndpointRegistry::from_config(&endpoints, None);
         let ep = registry.resolve(Some("fast"), TaskType::Targeting);
         assert_eq!(ep.name, "fast");
+    }
+
+    #[test]
+    fn test_resolve_chain_follows_fallbacks() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "default".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://default".into()),
+                default_for: vec!["targeting".to_owned(), "assertion".to_owned()],
+                fallbacks: vec!["pro".to_owned()],
+                ..Default::default()
+            },
+        );
+        endpoints.insert(
+            "pro".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://pro".into()),
+                model: Some("gpt-4.1".into()),
+                ..Default::default()
+            },
+        );
+
+        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let chain = registry.resolve_chain(None, TaskType::Assertion);
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].name, "default");
+        assert_eq!(chain[1].name, "pro");
+    }
+
+    #[test]
+    fn test_resolve_chain_skips_non_llm_and_cycles() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "default".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://default".into()),
+                default_for: vec!["assertion".to_owned()],
+                fallbacks: vec!["mcp1".to_owned(), "pro".to_owned()],
+                ..Default::default()
+            },
+        );
+        // mcp1 is not an LLM endpoint — must be skipped in the chain.
+        endpoints.insert(
+            "mcp1".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Mcp,
+                command: Some("npx".into()),
+                ..Default::default()
+            },
+        );
+        // Cycle: pro -> default must terminate.
+        endpoints.insert(
+            "pro".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://pro".into()),
+                fallbacks: vec!["default".to_owned()],
+                ..Default::default()
+            },
+        );
+
+        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let chain = registry.resolve_chain(None, TaskType::Assertion);
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].name, "default");
+        assert_eq!(chain[1].name, "pro");
+    }
+
+    #[test]
+    fn test_resolve_chain_max_attempts_default() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "default".to_owned(),
+            EndpointConfig {
+                endpoint_type: EndpointType::Llm,
+                url: Some("http://default".into()),
+                max_attempts: Some(7),
+                default_for: vec!["assertion".to_owned()],
+                ..Default::default()
+            },
+        );
+        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let ep = registry.resolve_chain(None, TaskType::Assertion);
+        assert_eq!(ep[0].max_attempts, 7);
     }
 
     #[test]

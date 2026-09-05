@@ -196,7 +196,7 @@ timeout:
   output; a selector that matches nothing triggers one retry with feedback.
 - **LLM errors are specific** — HTTP status, a truncated response-body
   snippet, and the attempt count are included, and deterministic client
-  errors (401/403/404) fail fast instead of burning three retries.
+  errors (401/403/404) fail fast instead of burning the retry budget.
 - **Assertions always see the page** — custom `system`+`user_template`
   definitions that omit the `{content}` placeholder automatically get the
   page URL/title/content appended, so the LLM never answers "I can't
@@ -381,6 +381,9 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 | `--llm-url` | `$HARNESS_LLM_TEST_URL` or `http://localhost:8080` | OpenAI-compatible endpoint |
 | `--llm-model` | `$HARNESS_LLM_TEST_MODEL` or `deepseek` | Model name |
 | `--llm-api-key` | `$HARNESS_LLM_API_KEY` | API key (Bearer token) |
+| `--llm-fallback-url` | `$HARNESS_LLM_FALLBACK_URL` | Fallback endpoint tried when the primary exhausts its attempts |
+| `--llm-fallback-model` | `$HARNESS_LLM_FALLBACK_MODEL` | Fallback model name |
+| `--llm-fallback-api-key` | `$HARNESS_LLM_FALLBACK_API_KEY` | Fallback API key |
 | `--llm-header` | — | Custom header `Name:Value` (repeatable) |
 | `--model-param` | — | Provider param `key=value` (repeatable) |
 | `--base-url` | `$HARNESS_BROWSER_BASE_URL` or `http://localhost:4200` | App under test |
@@ -396,6 +399,17 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 | `--continue-on-failure` | off | Keep running remaining steps after a step failure (default: fail fast) |
 
 CLI flags override the scenario `[config]`.
+
+**Retry + fallback behavior:** every LLM call is retried up to
+`HARNESS_LLM_CALL_ATTEMPTS` times (default 3) on transient failures
+(network errors, HTTP 429/5xx, invalid JSON, and HTTP 200 with an empty
+body — the gateway warm-up signature). When an endpoint still fails, the
+fallback chain is tried: `--llm-fallback-url`/`--llm-fallback-model`/
+`--llm-fallback-api-key` (or `$HARNESS_LLM_FALLBACK_*`) configure a single
+fallback endpoint for the implicit default endpoint. Pair a cheap primary
+with a more expensive, more powerful fallback — the fallback is only billed
+when the primary fails. Scenarios that declare `[config.endpoints]` use
+per-endpoint `fallbacks = [...]` instead (see below).
 
 ## Endpoints
 
@@ -457,8 +471,47 @@ endpoint = "vision"
 **Routing:**
 
 - `default_for` lists which task types an endpoint serves automatically
-  (`targeting` for element resolution, `assertion` for assertions).
+  (`targeting` for element resolution, `assertion` for assertions) — this is
+  the per-task model specification: give each task type its own endpoint
+  (e.g. a cheap model for targeting, a stronger one for assertions) by
+  splitting `default_for` across endpoints.
 - Add `endpoint = "name"` on any step or `[[test]]` group to override routing.
+
+**Retries + fallback chains:**
+
+- `max_attempts` (per endpoint, default 3; global env override
+  `HARNESS_LLM_CALL_ATTEMPTS`) — how often a single chat completion is
+  retried on transient failures before the endpoint is considered failed.
+- `fallbacks = ["other_endpoint", ...]` (LLM endpoints only) — an ordered
+  chain: when an endpoint exhausts its attempts, the next fallback is tried,
+  and so on, until one answers. The answering endpoint is the one charged
+  (per-usage cost reporting attributes the call correctly). Practical
+  pattern: a cheap primary model with a more powerful, more expensive
+  fallback that is only billed when the primary fails.
+
+  ```toml
+  # Cheap by default; escalate to a stronger model when the gateway is
+  # down or returns garbage. Both endpoints serve both task types.
+  [config.endpoints.default]
+  type = "llm"
+  url = "$LLM_URL"            # home gateway / cheap model
+  model = "deepseek-v3"
+  default_for = ["targeting", "assertion"]
+  max_attempts = 5            # be patient with the local gateway
+  fallbacks = ["pro"]         # escalate only after 5 attempts
+
+  [config.endpoints.pro]
+  type = "llm"
+  url = "https://api.openai.com"
+  model = "gpt-4.1"
+  api_key = "sk-..."
+  pricing = { input_per_1m_tokens = 2.00, output_per_1m_tokens = 8.00 }
+  default_for = []
+  ```
+
+  Chains are cycle-guarded and deduplicated; non-LLM endpoints in a
+  `fallbacks` list are skipped. When all endpoints fail, the error message
+  names every endpoint and its failure.
 
 ## A2A agents
 

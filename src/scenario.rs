@@ -219,6 +219,17 @@ pub struct EndpointConfig {
     /// endpoint.
     #[serde(default)]
     pub vision: bool,
+    /// How often a single chat completion against this endpoint is retried
+    /// on transient failures (HTTP 429/5xx, empty 200 bodies, network
+    /// errors) before the fallback chain is tried. Default: 3 (override
+    /// globally with `HARNESS_LLM_CALL_ATTEMPTS`).
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+    /// Ordered names of other endpoints to try when this endpoint exhausts
+    /// its attempts. Only LLM endpoints are eligible. Useful for pairing a
+    /// cheap primary model with a more powerful/expensive fallback.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
 }
 
 /// Type discriminator for endpoint configuration.

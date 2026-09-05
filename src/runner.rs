@@ -10,9 +10,9 @@ use crate::a2a::A2aClient;
 use crate::budgets::{BudgetStatus, BudgetTracker};
 use crate::costs::UsageTracker;
 use crate::diagnostics;
-use crate::endpoints::{EndpointRegistry, TaskType};
-use crate::llm_chat_vision_with_usage;
-use crate::llm_chat_with_usage;
+use crate::endpoints::{EndpointRegistry, ResolvedEndpoint, TaskType};
+use crate::llm_chat_vision_with_usage_chain;
+use crate::llm_chat_with_usage_chain;
 use crate::mcp_client::McpClient;
 use crate::scenario::{AssertDefinition, ScenarioConfig, TestGroup, TestStep};
 use crate::selectors::{sanitize_selector, selector_is_useless, validate_selector};
@@ -328,6 +328,7 @@ impl ScenarioRunner {
             temperature: scenario_config.temperature,
             thinking: scenario_config.thinking,
             model_params: scenario_config.model_params.clone(),
+            max_attempts: crate::default_llm_attempts(),
         };
         let endpoints = EndpointRegistry::from_config(&scenario_config.endpoints, Some(&llm));
         let budgets = BudgetTracker::from_config(&scenario_config.budgets);
@@ -1215,30 +1216,12 @@ impl ScenarioRunner {
 
         eprintln!("      assert: {name} (custom preset)");
 
-        let endpoint = self
+        let chain = self
             .endpoints
-            .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
-        let llm = self.build_llm_for_endpoint(endpoint);
-        let usage = Arc::clone(&self.usage);
-        let endpoint_name = endpoint.name.clone();
+            .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Assertion);
         let sys = system.to_owned();
-        let image = image.map(str::to_owned);
 
-        let response = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let call = async {
-                match image.as_deref() {
-                    Some(img) => llm_chat_vision_with_usage(&llm, &sys, &user_prompt, img).await,
-                    None => llm_chat_with_usage(&llm, &sys, &user_prompt).await,
-                }
-            };
-            rt.block_on(call)
-        })
-        .join()
-        .unwrap();
+        let response = self.llm_call_chain(&chain, &sys, &user_prompt, image);
 
         response.map_or_else(
             |e| StepResult {
@@ -1246,10 +1229,10 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: format!("LLM assertion call failed: {e}"),
             },
-            |lr| {
-                usage.record_llm_call(
-                    &endpoint_name,
-                    endpoint,
+            |(lr, idx)| {
+                self.usage.record_llm_call(
+                    &chain[idx].name,
+                    chain[idx],
                     lr.usage.prompt_tokens,
                     lr.usage.completion_tokens,
                 );
@@ -1320,30 +1303,12 @@ impl ScenarioRunner {
 
         eprintln!("      assert: {preset_name}");
 
-        let endpoint = self
+        let chain = self
             .endpoints
-            .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
-        let llm = self.build_llm_for_endpoint(endpoint);
-        let usage = Arc::clone(&self.usage);
-        let endpoint_name = endpoint.name.clone();
+            .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Assertion);
         let sys = preset.system.to_owned();
-        let image = image.map(str::to_owned);
 
-        let response = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let call = async {
-                match image.as_deref() {
-                    Some(img) => llm_chat_vision_with_usage(&llm, &sys, &user_prompt, img).await,
-                    None => llm_chat_with_usage(&llm, &sys, &user_prompt).await,
-                }
-            };
-            rt.block_on(call)
-        })
-        .join()
-        .unwrap();
+        let response = self.llm_call_chain(&chain, &sys, &user_prompt, image);
 
         response.map_or_else(
             |e| StepResult {
@@ -1351,10 +1316,10 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: format!("LLM assertion call failed: {e}"),
             },
-            |lr| {
-                usage.record_llm_call(
-                    &endpoint_name,
-                    endpoint,
+            |(lr, idx)| {
+                self.usage.record_llm_call(
+                    &chain[idx].name,
+                    chain[idx],
                     lr.usage.prompt_tokens,
                     lr.usage.completion_tokens,
                 );
@@ -1465,30 +1430,12 @@ impl ScenarioRunner {
 
         eprintln!("      custom assert");
 
-        let endpoint = self
+        let chain = self
             .endpoints
-            .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
-        let llm = self.build_llm_for_endpoint(endpoint);
-        let usage = Arc::clone(&self.usage);
-        let endpoint_name = endpoint.name.clone();
+            .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Assertion);
         let sys = system.to_owned();
-        let image = image.map(str::to_owned);
 
-        let response = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let call = async {
-                match image.as_deref() {
-                    Some(img) => llm_chat_vision_with_usage(&llm, &sys, &user, img).await,
-                    None => llm_chat_with_usage(&llm, &sys, &user).await,
-                }
-            };
-            rt.block_on(call)
-        })
-        .join()
-        .unwrap();
+        let response = self.llm_call_chain(&chain, &sys, &user, image);
 
         response.map_or_else(
             |e| StepResult {
@@ -1496,10 +1443,10 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: format!("LLM assertion call failed: {e}"),
             },
-            |lr| {
-                usage.record_llm_call(
-                    &endpoint_name,
-                    endpoint,
+            |(lr, idx)| {
+                self.usage.record_llm_call(
+                    &chain[idx].name,
+                    chain[idx],
                     lr.usage.prompt_tokens,
                     lr.usage.completion_tokens,
                 );
@@ -1745,7 +1692,52 @@ impl ScenarioRunner {
             temperature: self.llm.temperature,
             thinking: self.llm.thinking,
             model_params: self.llm.model_params.clone(),
+            max_attempts: endpoint.max_attempts.max(1),
         }
+    }
+
+    /// Runs a single LLM call against an ordered endpoint chain (primary +
+    /// fallbacks). Every endpoint gets its own `max_attempts` retry budget;
+    /// the first endpoint that answers wins. Returns the response together
+    /// with the chain index of the answering endpoint (0 = primary) so the
+    /// caller can attribute usage to the correct endpoint.
+    fn llm_call_chain(
+        &self,
+        chain: &[&ResolvedEndpoint],
+        system: &str,
+        user: &str,
+        image: Option<&str>,
+    ) -> Result<(crate::costs::LlmResponse, usize), String> {
+        if chain.is_empty() {
+            return Err("empty LLM endpoint chain".into());
+        }
+        let primary = self.build_llm_for_endpoint(chain[0]);
+        let fallbacks: Vec<LlmConfig> = chain[1..]
+            .iter()
+            .map(|e| self.build_llm_for_endpoint(e))
+            .collect();
+        let sys = system.to_owned();
+        let user = user.to_owned();
+        let image = image.map(str::to_owned);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let call = async {
+                match image.as_deref() {
+                    Some(img) => {
+                        llm_chat_vision_with_usage_chain(&primary, &fallbacks, &sys, &user, img)
+                            .await
+                    }
+                    None => llm_chat_with_usage_chain(&primary, &fallbacks, &sys, &user).await,
+                }
+            };
+            rt.block_on(call)
+        })
+        .join()
+        .unwrap()
     }
 
     /// Resolves a CSS selector for the target element. Uses the explicit
@@ -1803,40 +1795,23 @@ impl ScenarioRunner {
 
         eprintln!("      LLM targeting: {target}");
 
-        let endpoint = self
+        let chain = self
             .endpoints
-            .resolve(step_endpoint.or(test_endpoint), TaskType::Targeting);
-        let llm = self.build_llm_for_endpoint(endpoint);
-        let usage = Arc::clone(&self.usage);
-        let endpoint_name = endpoint.name.clone();
-        let endpoint_clone = endpoint.clone();
+            .resolve_chain(step_endpoint.or(test_endpoint), TaskType::Targeting);
         let sys = system.to_owned();
 
-        let call_llm = |prompt: &str| {
-            let llm = llm.clone();
-            let sys = sys.clone();
-            let prompt = prompt.to_owned();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(llm_chat_with_usage(&llm, &sys, &prompt))
-            })
-            .join()
-            .unwrap()
-        };
+        let call_llm = |prompt: &str| self.llm_call_chain(&chain, &sys, prompt, None);
 
         let first = call_llm(&user);
-        let lr = match first {
+        let (lr, idx) = match first {
             Ok(lr) => lr,
             Err(e) => {
                 return Err(format!("LLM element targeting failed: {e}"));
             }
         };
-        usage.record_llm_call(
-            &endpoint_name,
-            &endpoint_clone,
+        self.usage.record_llm_call(
+            &chain[idx].name,
+            chain[idx],
             lr.usage.prompt_tokens,
             lr.usage.completion_tokens,
         );
@@ -1862,7 +1837,7 @@ impl ScenarioRunner {
                 "      selector {clean} matches nothing — retrying LLM targeting with feedback"
             );
             let second = call_llm(&retry_user);
-            let lr2 = match second {
+            let (lr2, idx2) = match second {
                 Ok(lr2) => lr2,
                 Err(e) => {
                     return Err(format!(
@@ -1870,9 +1845,9 @@ impl ScenarioRunner {
                     ));
                 }
             };
-            usage.record_llm_call(
-                &endpoint_name,
-                &endpoint_clone,
+            self.usage.record_llm_call(
+                &chain[idx2].name,
+                chain[idx2],
                 lr2.usage.prompt_tokens,
                 lr2.usage.completion_tokens,
             );

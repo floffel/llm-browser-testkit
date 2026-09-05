@@ -79,6 +79,11 @@ pub struct LlmConfig {
     /// Provider-specific parameters merged into the request body
     /// (e.g. `effort = "high"` for Anthropic).
     pub model_params: HashMap<String, Value>,
+    /// How many times a single call to this endpoint is retried on
+    /// transient failures before giving up (or moving to the next fallback
+    /// endpoint). Default 3; override globally with
+    /// `HARNESS_LLM_CALL_ATTEMPTS`.
+    pub max_attempts: u32,
 }
 
 impl LlmConfig {
@@ -95,8 +100,20 @@ impl LlmConfig {
             temperature: 0.0,
             thinking: None,
             model_params: HashMap::new(),
+            max_attempts: default_llm_attempts(),
         }
     }
+}
+
+/// Reads `HARNESS_LLM_CALL_ATTEMPTS` (default 3) — how many times a single
+/// chat completion is retried before the endpoint is considered failed.
+#[must_use]
+pub fn default_llm_attempts() -> u32 {
+    std::env::var("HARNESS_LLM_CALL_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(3)
 }
 
 /// Parses `HARNESS_LLM_HEADERS` env var (JSON object) into a header map.
@@ -177,11 +194,11 @@ pub async fn llm_chat(llm: &LlmConfig, system: &str, user: &str) -> Option<Strin
 ///
 /// Retries transient failures (network errors, HTTP 429/5xx, invalid
 /// responses, and HTTP 200 + empty body — a gateway warm-up signature,
-/// retried with a 3s backoff) with a short backoff, and returns the last
-/// underlying error instead of collapsing everything into a generic
-/// "server down" message. The error text includes the HTTP status and a
-/// truncated response-body snippet, so a gateway that answers with an
-/// HTML error page is identifiable in CI logs instead of surfacing as a
+/// retried with a 3s backoff) up to `llm.max_attempts` times, and returns
+/// the last underlying error instead of collapsing everything into a
+/// generic "server down" message. The error text includes the HTTP status
+/// and a truncated response-body snippet, so a gateway that answers with
+/// an HTML error page is identifiable in CI logs instead of surfacing as a
 /// bare JSON decode error. Deterministic client errors (401/403/404) are
 /// not retried.
 ///
@@ -219,6 +236,68 @@ pub async fn llm_chat_vision_with_usage(
     chat_with_retry(llm, system, user, Some(image_data_url)).await
 }
 
+/// Calls a chain of endpoints: the primary [`LlmConfig`] first, then each
+/// fallback in order. Every endpoint gets its own `max_attempts` retry
+/// budget; the first endpoint that answers wins.
+///
+/// Returns the response together with the index of the endpoint that
+/// produced it (0 = primary, 1 = first fallback, …) so the caller can
+/// attribute cost/usage to the right endpoint.
+///
+/// # Errors
+///
+/// Returns an error naming every endpoint that failed.
+pub async fn llm_chat_with_usage_chain(
+    primary: &LlmConfig,
+    fallbacks: &[LlmConfig],
+    system: &str,
+    user: &str,
+) -> Result<(LlmResponse, usize), String> {
+    chat_chain_with_retry(primary, fallbacks, system, user, None).await
+}
+
+/// Vision variant of [`llm_chat_with_usage_chain`].
+///
+/// # Errors
+///
+/// Returns an error naming every endpoint that failed.
+pub async fn llm_chat_vision_with_usage_chain(
+    primary: &LlmConfig,
+    fallbacks: &[LlmConfig],
+    system: &str,
+    user: &str,
+    image_data_url: &str,
+) -> Result<(LlmResponse, usize), String> {
+    chat_chain_with_retry(primary, fallbacks, system, user, Some(image_data_url)).await
+}
+
+/// Shared chain loop: try each endpoint (primary then fallbacks) with its
+/// own retry budget; first success wins.
+async fn chat_chain_with_retry(
+    primary: &LlmConfig,
+    fallbacks: &[LlmConfig],
+    system: &str,
+    user: &str,
+    image_data_url: Option<&str>,
+) -> Result<(LlmResponse, usize), String> {
+    let mut failures: Vec<String> = Vec::new();
+    for (i, llm) in std::iter::once(primary).chain(fallbacks.iter()).enumerate() {
+        match chat_with_retry(llm, system, user, image_data_url).await {
+            Ok(resp) => return Ok((resp, i)),
+            Err(e) => failures.push(format!("endpoint '{}' ({:?}): {e}", llm.url, llm.model)),
+        }
+    }
+    let details = failures.iter().fold(String::new(), |mut acc, f| {
+        use std::fmt::Write as _;
+        let _ = writeln!(acc, "  - {f}");
+        acc
+    });
+    Err(format!(
+        "LLM call failed on all {} endpoint(s):\n{details}",
+        failures.len()
+    ))
+}
+
 /// Shared retry loop for text-only and vision chat completions.
 async fn chat_with_retry(
     llm: &LlmConfig,
@@ -230,7 +309,7 @@ async fn chat_with_retry(
     let mut last_err = String::from("LLM call failed");
     let mut attempts: u32 = 0;
 
-    while attempts < LLM_CALL_ATTEMPTS {
+    while attempts < llm.max_attempts {
         attempts += 1;
         match llm_chat_once(&client, llm, system, user, image_data_url).await {
             Ok(resp) => return Ok(resp),
@@ -243,7 +322,7 @@ async fn chat_with_retry(
                     _ => Duration::from_millis(500 * u64::from(attempts)),
                 };
                 last_err = err.to_string();
-                if attempts >= LLM_CALL_ATTEMPTS || !err.is_retryable() {
+                if attempts >= llm.max_attempts || !err.is_retryable() {
                     break;
                 }
                 tokio::time::sleep(backoff).await;
@@ -256,9 +335,6 @@ async fn chat_with_retry(
         url = llm.url
     ))
 }
-
-/// Number of attempts for a single chat completion call.
-const LLM_CALL_ATTEMPTS: u32 = 3;
 
 /// Builds the chat messages array. Text-only messages keep the plain
 /// string `content` shape (maximum provider compatibility); vision calls
@@ -492,7 +568,98 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 mod tests {
     use crate::costs::extract_usage;
     use crate::truncate;
-    use crate::{llm_base_url, llm_model, parse_headers_env, LlmConfig};
+    use crate::{default_llm_attempts, llm_base_url, llm_model, parse_headers_env, LlmConfig};
+
+    /// Starts a minimal HTTP server that answers every chat-completions
+    /// request with `status`/`body`. Returns its base URL.
+    fn mock_llm_server(status: u16, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if status == 200 { "OK" } else { "ERROR" },
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    const PASS_BODY: &str = r#"{"choices":[{"message":{"content":"PASS"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#;
+
+    fn cfg(url: &str, attempts: u32) -> LlmConfig {
+        LlmConfig {
+            url: url.to_owned(),
+            model: "mock".to_owned(),
+            api_key: None,
+            headers: std::collections::HashMap::new(),
+            timeout: std::time::Duration::from_secs(10),
+            temperature: 0.0,
+            thinking: None,
+            model_params: std::collections::HashMap::new(),
+            max_attempts: attempts,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chain_primary_success_returns_index_zero() {
+        let good = mock_llm_server(200, PASS_BODY);
+        let (resp, idx) = crate::llm_chat_with_usage_chain(&cfg(&good, 2), &[], "s", "u")
+            .await
+            .expect("primary endpoint should answer");
+        assert_eq!(idx, 0);
+        assert_eq!(resp.content, "PASS");
+        assert_eq!(resp.usage.prompt_tokens, 7);
+    }
+
+    #[tokio::test]
+    async fn test_chain_falls_back_on_empty_200() {
+        // Primary always returns HTTP 200 with an EMPTY body (the gateway
+        // warm-up signature) — after `max_attempts` it must hand over to the
+        // fallback, which answers properly.
+        let broken = mock_llm_server(200, "");
+        let good = mock_llm_server(200, PASS_BODY);
+        let (resp, idx) =
+            crate::llm_chat_with_usage_chain(&cfg(&broken, 2), &[cfg(&good, 2)], "s", "u")
+                .await
+                .expect("fallback endpoint should answer");
+        assert_eq!(idx, 1);
+        assert_eq!(resp.content, "PASS");
+    }
+
+    #[tokio::test]
+    async fn test_chain_reports_all_endpoints_on_total_failure() {
+        let broken1 = mock_llm_server(200, "");
+        let broken2 = mock_llm_server(503, "unavailable");
+        let err =
+            crate::llm_chat_with_usage_chain(&cfg(&broken1, 2), &[cfg(&broken2, 2)], "s", "u")
+                .await
+                .expect_err("both endpoints fail");
+        assert!(err.contains("all 2 endpoint(s)"), "got: {err}");
+        assert!(err.contains(&broken1), "primary URL missing: {err}");
+        assert!(err.contains(&broken2), "fallback URL missing: {err}");
+    }
+
+    #[test]
+    fn test_default_llm_attempts_env() {
+        std::env::set_var("HARNESS_LLM_CALL_ATTEMPTS", "7");
+        assert_eq!(default_llm_attempts(), 7);
+        std::env::set_var("HARNESS_LLM_CALL_ATTEMPTS", "0");
+        assert_eq!(default_llm_attempts(), 3, "0 must fall back to default");
+        std::env::set_var("HARNESS_LLM_CALL_ATTEMPTS", "junk");
+        assert_eq!(default_llm_attempts(), 3, "non-numeric must fall back");
+        std::env::remove_var("HARNESS_LLM_CALL_ATTEMPTS");
+        assert_eq!(default_llm_attempts(), 3);
+    }
 
     #[test]
     fn test_truncate_short() {
