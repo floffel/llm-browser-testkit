@@ -9,8 +9,9 @@
 //!   diagnostics; debug events (LLM calls, selector resolution) are hidden
 //!   unless `-v`/`-vv` is passed.
 //! - **NDJSON** (`--log-file`) — one JSON object per event, each with a `ts`
-//!   epoch-millisecond field and a `type` discriminator. Machine-readable and
-//!   lossless (no truncation): `jq '. | select(.type == "step_finished" and
+//!   epoch-millisecond field and a `type` discriminator. Machine-readable
+//!   and lossless apart from configured/observed secret redaction:
+//!   `jq '. | select(.type == "step_finished" and
 //!   .status == "failed")' run.jsonl` works out of the box.
 //! - **JUnit XML** (`--junit`) — one `<testcase>` per test with `<failure>`
 //!   entries per failed step, for Jenkins/GitLab/Azure/TeamCity.
@@ -29,6 +30,7 @@ use serde_json::json;
 
 use crate::costs::UsageSnapshot;
 use crate::events::{StepStatus, TestEvent};
+use crate::redact::Redactor;
 
 /// Console verbosity level. Higher = more output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -192,6 +194,7 @@ pub struct Reporter {
     palette: Palette,
     github_annotations: bool,
     github_summary: Mutex<Option<RunSummary>>,
+    redactor: Mutex<Redactor>,
     state: Mutex<ReporterState>,
 }
 
@@ -229,6 +232,7 @@ impl Reporter {
             },
             github_annotations,
             github_summary: Mutex::new(None),
+            redactor: Mutex::new(Redactor::new()),
             state: Mutex::new(ReporterState {
                 jsonl,
                 junit_path: junit_file.map(Path::to_path_buf),
@@ -241,21 +245,37 @@ impl Reporter {
         })
     }
 
-    /// Emits one event to every enabled sink.
+    /// Emits one event to every enabled sink. The event is cloned and
+    /// redacted (configured + runtime-observed secrets) before any sink
+    /// sees it.
     ///
     /// # Errors
     ///
     /// Returns an io error when writing the NDJSON log file fails.
     pub fn emit(&self, event: &TestEvent) -> io::Result<()> {
-        let (level, text) = format_event(event, self.palette);
+        let event = lock(&self.redactor).redact_event(event);
+        let (level, text) = format_event(&event, self.palette);
         if self.level.shows(level) {
             let _ = writeln!(io::stderr().lock(), "{text}");
         }
-        self.write_jsonl(event)?;
-        self.track_trace(event);
-        self.track_junit(event);
-        self.track_github(event);
+        self.write_jsonl(&event)?;
+        self.track_trace(&event);
+        self.track_junit(&event);
+        self.track_github(&event);
         Ok(())
+    }
+
+    /// Registers a literal value redacted from every report sink. Explicit
+    /// extras always apply, regardless of length. Append-only: config-
+    /// derived secrets registered later coexist with these.
+    pub fn add_redaction_secret(&self, value: &str) {
+        lock(&self.redactor).add_secret(value, 0);
+    }
+
+    /// Registers config-derived secrets (with the default minimum length)
+    /// redacted from every report sink.
+    pub fn add_redaction_secrets(&self, values: impl IntoIterator<Item = String>) {
+        lock(&self.redactor).add_secret_values(values);
     }
 
     /// Writes a plain informational line if the current level allows it.
@@ -281,6 +301,7 @@ impl Reporter {
 
     fn line(&self, level: Level, text: &str) {
         if self.level.shows(level) {
+            let text = lock(&self.redactor).redact(text);
             let _ = writeln!(io::stderr().lock(), "{text}");
         }
     }

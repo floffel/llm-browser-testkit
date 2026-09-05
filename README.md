@@ -214,8 +214,8 @@ rendered for humans and serialized for machines:
   step results (then warnings too), or `-v`/`-vv` to add LLM call details
   (endpoint, model, duration, tokens, cost) and step starts.
 - **NDJSON log** (`--log-file run.jsonl`) — one JSON object per event with
-  a `type` discriminator and an epoch-ms `ts` field. Lossless: untruncated
-  messages, ideal for CI artifact analysis:
+  a `type` discriminator and an epoch-ms `ts` field. Lossless apart from
+  secret redaction: untruncated messages, ideal for CI artifact analysis:
 
   ```
   jq '. | select(.type == "step_finished" and .status == "failed")' run.jsonl
@@ -233,6 +233,38 @@ rendered for humans and serialized for machines:
 Truncation (`<truncated N chars>`) is always boundary-safe (multi-byte
 UTF-8 can never panic it) and reports how much was cut; full text is
 preserved in the NDJSON log.
+
+## Secret redaction
+
+Every sink is redacted through one chokepoint, so a leaked secret can never
+make it into a log or CI report:
+
+- **API keys** — `llm_api_key` and per-endpoint `api_key`
+- **Static credentials** — Entra `auth.client_secret`, AWS
+  `secret_access_key` / `session_token`
+- **Sensitive header values** — values of `authorization`-family headers
+  (matched case-insensitively: `authorization`, `api-key`, `x-api-key`,
+  `x-auth-token`, `token`, `cookie`, …) in `llm_headers` and endpoint
+  `headers`
+- **Runtime-obtained tokens** — token-command and header-command output,
+  Entra client-credentials and managed-identity access tokens (registered
+  the moment they are fetched, so the `LlmCallFinished` event that echoes
+  them is redacted too)
+- **Explicit extras** — `--redact <SECRET>` (repeatable) or the
+  `HARNESS_REDACT` env var (comma-separated), for secrets not present in
+  the config (URL query tokens, scenario-embedded test data):
+
+  ```
+  llm-browser-testkit run scenario.toml --redact 'abc123tokenxyz'
+  HARNESS_REDACT='abc123tokenxyz,xyz789tokenabc' llm-browser-testkit run scenario.toml
+  ```
+
+Secrets shorter than 6 characters are skipped when derived from config or
+runtime sources so short values (e.g. `"dev"`) do not destroy log
+readability; explicit `--redact` values always apply. Replacement is
+exact-match and case-sensitive. Raw `eprintln!` sites that bypass the
+reporter (MCP/A2A server startup banners, the `#[browser_test]` run-report
+strings, the cost report) are not redacted.
 
 ## Vision assertions (screenshots)
 
@@ -417,6 +449,7 @@ llm-browser-testkit run <scenario.toml> [OPTIONS]
 | `--llm-fallback-model` | `$HARNESS_LLM_FALLBACK_MODEL` | Fallback model name |
 | `--llm-fallback-api-key` | `$HARNESS_LLM_FALLBACK_API_KEY` | Fallback API key |
 | `--llm-header` | — | Custom header `Name:Value` (repeatable) |
+| `--redact` | `$HARNESS_REDACT` (comma-separated) | Literal value redacted from all rows/sinks (repeatable) |
 | `--model-param` | — | Provider param `key=value` (repeatable) |
 | `--base-url` | `$HARNESS_BROWSER_BASE_URL` or `http://localhost:4200` | App under test |
 | `--headless` | `true` | Run Chrome headlessly |

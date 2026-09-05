@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::redact::observe_secret;
 use crate::scenario::{AuthConfig, AuthMode};
 
 /// Default scope for `Azure` Cognitive Services Entra tokens.
@@ -160,6 +161,7 @@ pub async fn run_token_command(cmd: &str) -> Result<String, String> {
     if line.is_empty() {
         return Err("token command produced empty stdout".to_owned());
     }
+    observe_secret(&line);
     Ok(line)
 }
 
@@ -235,6 +237,7 @@ async fn parse_token_response(
             )
         })?
         .to_owned();
+    observe_secret(&token);
     let ttl = json["expires_in"]
         .as_u64()
         .or_else(|| {

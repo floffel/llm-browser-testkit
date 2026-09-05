@@ -74,6 +74,11 @@ enum Command {
         #[arg(long = "llm-header", value_parser = parse_header)]
         llm_headers: Vec<(String, String)>,
 
+        /// Additional literal values redacted from all logs and reports
+        /// (repeatable; also `HARNESS_REDACT`, comma-separated).
+        #[arg(long, env = "HARNESS_REDACT", value_delimiter = ',')]
+        redact: Vec<String>,
+
         /// Model parameter `key=value` merged into the chat completion body
         /// (repeatable, e.g. `--model-param effort=high`).
         #[arg(long = "model-param", value_parser = parse_model_param)]
@@ -199,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
             llm_fallback_model,
             llm_fallback_api_key,
             llm_headers,
+            redact,
             model_params,
             headless,
             timeout,
@@ -233,6 +239,9 @@ async fn main() -> anyhow::Result<()> {
                 trace.as_deref(),
                 github,
             )?);
+            for s in &redact {
+                reporter.add_redaction_secret(s);
+            }
 
             let toml_content = std::fs::read_to_string(&scenario)
                 .with_context(|| format!("reading {}", scenario.display()))?;
@@ -463,7 +472,15 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&reporter),
             );
 
-            let report = runner.run(&expanded_tests)?;
+            let report = match runner.run(&expanded_tests) {
+                Ok(report) => report,
+                Err(err) => {
+                    // Route through the reporter so the error text is
+                    // redacted; anyhow's own `?` rendering would bypass it.
+                    reporter.error(format!("{err:#}"));
+                    std::process::exit(1);
+                }
+            };
 
             reporter.finish()?;
 
@@ -599,5 +616,28 @@ mod tests {
             .unwrap();
         let sub = matches.subcommand_matches("run").unwrap();
         assert_eq!(sub.get_count("quiet"), 2);
+    }
+
+    #[test]
+    fn test_cli_run_redact_flag_repeatable_and_comma_split() {
+        let cmd = super::Cli::command();
+        let matches = cmd
+            .try_get_matches_from([
+                "llm-browser-testkit",
+                "run",
+                "t.toml",
+                "--redact",
+                "tok-abc",
+                "--redact",
+                "one,two,three",
+            ])
+            .unwrap();
+        let sub = matches.subcommand_matches("run").unwrap();
+        let vals: Vec<String> = sub
+            .get_many::<String>("redact")
+            .unwrap()
+            .map(Clone::clone)
+            .collect();
+        assert_eq!(vals, vec!["tok-abc", "one", "two", "three"]);
     }
 }

@@ -37,6 +37,8 @@ pub mod events;
 pub mod mcp_client;
 /// MCP server for exposing the framework as an MCP server.
 pub mod mcp_server;
+/// Secret redaction for every report sink.
+pub mod redact;
 /// Run reporting: console, NDJSON, JUnit, GitHub and Perfetto sinks.
 pub mod reporting;
 /// Step-by-step scenario executor (navigate, click, type, wait, assert).

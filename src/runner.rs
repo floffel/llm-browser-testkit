@@ -315,6 +315,9 @@ impl ScenarioRunner {
         definitions: Vec<AssertDefinition>,
         reporter: Arc<Reporter>,
     ) -> Self {
+        reporter.add_redaction_secrets(crate::redact::collect_secrets_from_scenario_config(
+            &scenario_config,
+        ));
         let llm = LlmConfig {
             url: scenario_config
                 .llm_url
