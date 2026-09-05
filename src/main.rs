@@ -133,6 +133,12 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
     Ok((k.trim().to_owned(), v.trim().to_owned()))
 }
 
+/// Treats `None`/empty strings (e.g. an interpolated but unset CI var) as
+/// `None`, so `${{ vars.X || '' }}` never becomes a phantom endpoint.
+fn nonempty(v: Option<String>) -> Option<String> {
+    v.filter(|s| !s.trim().is_empty())
+}
+
 /// Parses "key=value" strings from `--model-param`.
 /// JSON values (quoted strings, numbers, booleans) are parsed as-is;
 /// bare words become JSON strings.
@@ -193,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
             // `fallbacks = [...]` is the declarative form). Synthesize a
             // two-endpoint table here so CLI/env fallback settings behave
             // exactly like the declarative chain.
-            if let Some(fb_url) = llm_fallback_url {
+            if let Some(fb_url) = nonempty(llm_fallback_url) {
                 if config.endpoints.is_empty() {
                     let mut endpoints = std::collections::HashMap::new();
                     endpoints.insert(
@@ -214,8 +220,8 @@ async fn main() -> anyhow::Result<()> {
                         llm_browser_testkit::scenario::EndpointConfig {
                             endpoint_type: llm_browser_testkit::scenario::EndpointType::Llm,
                             url: Some(fb_url),
-                            model: llm_fallback_model,
-                            api_key: llm_fallback_api_key,
+                            model: nonempty(llm_fallback_model),
+                            api_key: nonempty(llm_fallback_api_key),
                             default_for: Vec::new(),
                             ..Default::default()
                         },
