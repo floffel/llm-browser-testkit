@@ -1,0 +1,6 @@
+# Prefer dependency versions whose MSRV still fits rustc 1.89 (the crate's
+# rust-version and the Docker image's rust:1.89-alpine builder). Without
+# this, `cargo generate-lockfile` picks the newest AWS SDK crates, which
+# now require rustc 1.94+.
+[resolver]
+incompatible-rust-versions = "fallback"

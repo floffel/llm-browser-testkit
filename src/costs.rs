@@ -266,6 +266,12 @@ mod tests {
             per_call_price: per_call,
             max_attempts: 3,
             fallbacks: vec![],
+            provider: crate::scenario::Provider::Openai,
+            deployment: None,
+            api_version: None,
+            auth: crate::scenario::AuthConfig::default(),
+            header_commands: std::collections::HashMap::new(),
+            aws: crate::scenario::AwsConfig::default(),
         }
     }
 

@@ -2,8 +2,11 @@
 
 use std::collections::HashMap;
 
+use crate::scenario::AuthConfig;
+use crate::scenario::AwsConfig;
 use crate::scenario::EndpointConfig;
 use crate::scenario::EndpointType;
+use crate::scenario::Provider;
 
 /// Classification of a task for endpoint routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +62,18 @@ pub struct ResolvedEndpoint {
     /// Ordered names of fallback endpoints tried when this endpoint
     /// exhausts its attempts (LLM endpoints only).
     pub fallbacks: Vec<String>,
+    /// LLM provider protocol.
+    pub provider: Provider,
+    /// `Azure` `OpenAI` deployment name (provider `azure`).
+    pub deployment: Option<String>,
+    /// `Azure` `OpenAI` API version (provider `azure`).
+    pub api_version: Option<String>,
+    /// Authentication configuration.
+    pub auth: AuthConfig,
+    /// Headers produced by running a command per call.
+    pub header_commands: HashMap<String, String>,
+    /// AWS credential settings (provider `bedrock`).
+    pub aws: AwsConfig,
 }
 
 impl ResolvedEndpoint {
@@ -80,6 +95,12 @@ impl ResolvedEndpoint {
             per_call_price: 0.0,
             max_attempts: crate::default_llm_attempts(),
             fallbacks: Vec::new(),
+            provider: Provider::Openai,
+            deployment: None,
+            api_version: None,
+            auth: AuthConfig::default(),
+            header_commands: HashMap::new(),
+            aws: AwsConfig::default(),
         }
     }
 }
@@ -122,6 +143,12 @@ impl EndpointRegistry {
                     per_call_price: 0.0,
                     max_attempts: llm.max_attempts,
                     fallbacks: Vec::new(),
+                    provider: llm.provider,
+                    deployment: llm.deployment.clone(),
+                    api_version: llm.api_version.clone(),
+                    auth: llm.auth.clone(),
+                    header_commands: llm.header_commands.clone(),
+                    aws: llm.aws.clone(),
                 });
             let mut map = HashMap::new();
             let mut default_for = HashMap::new();
@@ -162,6 +189,12 @@ impl EndpointRegistry {
                 per_call_price: ec.pricing.as_ref().map_or(0.0, |p| p.per_call),
                 max_attempts: ec.max_attempts.unwrap_or_else(crate::default_llm_attempts),
                 fallbacks: ec.fallbacks.clone(),
+                provider: ec.provider,
+                deployment: ec.deployment.clone(),
+                api_version: ec.api_version.clone(),
+                auth: ec.auth.clone(),
+                header_commands: ec.header_commands.clone(),
+                aws: ec.aws.clone(),
             };
 
             for df in &ec.default_for {

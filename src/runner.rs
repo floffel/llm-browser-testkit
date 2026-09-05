@@ -338,6 +338,12 @@ impl ScenarioRunner {
             thinking: scenario_config.thinking,
             model_params: scenario_config.model_params.clone(),
             max_attempts: crate::default_llm_attempts(),
+            provider: crate::scenario::Provider::Openai,
+            deployment: None,
+            api_version: None,
+            auth: crate::scenario::AuthConfig::default(),
+            header_commands: std::collections::HashMap::new(),
+            aws: crate::scenario::AwsConfig::default(),
         };
         let endpoints = EndpointRegistry::from_config(&scenario_config.endpoints, Some(&llm));
         let budgets = BudgetTracker::from_config(&scenario_config.budgets);
@@ -1762,7 +1768,11 @@ impl ScenarioRunner {
     /// the runner's default LLM config for any unset fields.
     fn build_llm_for_endpoint(&self, endpoint: &crate::endpoints::ResolvedEndpoint) -> LlmConfig {
         LlmConfig {
-            url: if endpoint.url.is_empty() {
+            url: if endpoint.provider == crate::scenario::Provider::Bedrock {
+                // Bedrock builds its endpoint from the resolved AWS region
+                // when no URL is given — never inherit the default LLM URL.
+                endpoint.url.clone()
+            } else if endpoint.url.is_empty() {
                 self.llm.url.clone()
             } else {
                 endpoint.url.clone()
@@ -1785,6 +1795,12 @@ impl ScenarioRunner {
             thinking: self.llm.thinking,
             model_params: self.llm.model_params.clone(),
             max_attempts: endpoint.max_attempts.max(1),
+            provider: endpoint.provider,
+            deployment: endpoint.deployment.clone(),
+            api_version: endpoint.api_version.clone(),
+            auth: endpoint.auth.clone(),
+            header_commands: endpoint.header_commands.clone(),
+            aws: endpoint.aws.clone(),
         }
     }
 

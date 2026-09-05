@@ -499,8 +499,11 @@ endpoint = "vision"
 
 **Endpoint types:**
 
-- `llm` — OpenAI-compatible chat completions API. Pricing is per-token
-  (`input_per_1m_tokens`, `output_per_1m_tokens`).
+- `llm` — LLM chat API. Defaults to the OpenAI-compatible chat completions
+  endpoint; `provider = "azure"` (Azure OpenAI) and `provider = "bedrock"`
+  (AWS Bedrock, [see below](#llm-providers-azure--aws-bedrock)) are
+  supported. Pricing is per-token (`input_per_1m_tokens`,
+  `output_per_1m_tokens`).
 - `mcp` — [Model Context Protocol](https://modelcontextprotocol.io) server.
   Launched as a subprocess via `command` + `args`. Pricing is `per_call`.
 - `a2a` — [Agent-to-Agent Protocol](https://a2aprotocol.org) agent. Communicates
@@ -550,6 +553,67 @@ endpoint = "vision"
   Chains are cycle-guarded and deduplicated; non-LLM endpoints in a
   `fallbacks` list are skipped. When all endpoints fail, the error message
   names every endpoint and its failure.
+
+## LLM providers: Azure & AWS Bedrock
+
+Besides the default OpenAI-compatible API, LLM endpoints can target Azure
+OpenAI and AWS Bedrock.
+
+### Azure OpenAI
+
+```toml
+[config.endpoints.azure]
+type = "llm"
+provider = "azure"
+url = "https://my-resource.openai.azure.com"   # resource endpoint, no path
+deployment = "gpt-4o"                          # defaults to `model` when unset
+api_version = "2024-10-21"                     # default when unset
+api_key = "..."                                # sent as the `api-key` header
+model = "gpt-4o"                               # unused by Azure; kept for pricing model names
+pricing = { input_per_1m_tokens = 2.50, output_per_1m_tokens = 10.00 }
+default_for = ["targeting", "assertion"]
+```
+
+Requests go to
+`<url>/openai/deployments/<deployment>/chat/completions?api-version=<v>`.
+With the default `api-key` auth mode the key is sent in the `api-key` header
+(Azure's classic convention). Use `auth.api_key_header` to send an API key in
+any custom header on any provider.
+
+Instead of a static key you can authenticate with Entra ID — client
+credentials or a managed identity (see
+[LLM authentication](#llm-authentication) below).
+
+### AWS Bedrock
+
+```toml
+[config.endpoints.bedrock]
+type = "llm"
+provider = "bedrock"
+model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+region = "eu-central-1"          # optional: overrides the chain default
+profile = "staging"              # optional: named profile from ~/.aws
+pricing = { input_per_1m_tokens = 3.00, output_per_1m_tokens = 15.00 }
+default_for = ["targeting", "assertion"]
+
+# Optional: explicit credentials instead of the credential chain
+# [config.endpoints.bedrock.aws]
+# access_key_id = "AKIA..."
+# secret_access_key = "..."
+# session_token = "..."          # only for temporary credentials
+```
+
+Requests are signed with SigV4 and sent to
+`https://bedrock-runtime.<region>.amazonaws.com/model/<model>/converse`; the
+system prompt, `temperature`, `maxTokens`, and vision screenshots map to the
+Converse API (images become `image` content blocks). When no credentials are
+configured, the standard AWS credential chain is used — `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_PROFILE` env vars, `~/.aws/config` and
+`~/.aws/credentials`, SSO, ECS and EC2 IMDS — exactly like the AWS CLI. The
+resolved credentials (and region) are cached per endpoint config for the
+process lifetime. Requires building with the `aws` cargo feature
+(`cargo run --features aws ...`); the Docker image and release binaries
+include it.
 
 ## A2A agents
 
@@ -626,7 +690,8 @@ docker run --rm \
 ```
 
 A `Dockerfile` is included in the repository — it uses a multi-stage build with
-Alpine and Chromium.
+Alpine and Chromium. The image is built with `--all-features`, so all LLM
+providers (including Azure and AWS Bedrock) are available out of the box.
 
 ## MCP tools
 
@@ -833,25 +898,83 @@ present.
 
 ## LLM authentication
 
-The runner supports API keys and custom headers for SSO or alternative auth:
+The runner supports API keys, Entra ID tokens, token commands, and custom
+(static or command-produced) headers — per endpoint.
+
+**API key** (default `api-key` mode): sent as `Authorization: Bearer <key>`
+on OpenAI-compatible endpoints, as the `api-key` header on Azure. Set
+`auth.api_key_header` to use a different header name on any provider:
 
 ```toml
-[config]
-llm_api_key = "sk-..."
-llm_headers = { "X-Org-ID" = "acme", "X-Project" = "qa" }
-```
-
-Endpoints can also carry their own credentials:
-
-```toml
-[config.endpoints.production]
+[config.endpoints.api]
 type = "llm"
 url = "https://api.openai.com"
-api_key = "sk-prod-..."
+api_key = "sk-..."
 model = "gpt-4o"
+
+[config.endpoints.api.auth]
+mode = "api-key"                # default; can be omitted
+api_key_header = "X-Api-Key"    # send the key here instead of Authorization
 ```
 
-Via CLI:
+**Custom headers** — static `headers` and per-call `header_commands`
+(provider-agnostic; the command's first stdout line becomes the header value):
+
+```toml
+[config.endpoints.prod]
+type = "llm"
+url = "https://api.example.com"
+model = "gpt-4o"
+headers = { "X-Org-ID" = "acme" }            # static
+
+[config.endpoints.prod.header_commands]
+X-M2M-Token = "kubectl exec tokenizer -- token"   # dynamic, per call
+```
+
+**Token commands** (`mode = "token-command"`): run any program, its stdout
+(first line) becomes the bearer token. Works with any CLI that prints a
+token — Azure CLI, Vault, ...:
+
+```toml
+[config.endpoints.azure]
+type = "llm"
+provider = "azure"
+url = "https://my-resource.openai.azure.com"
+model = "gpt-4o"
+
+[config.endpoints.azure.auth]
+mode = "token-command"
+token_command = "az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv"
+cache_ttl_secs = 240            # reuse the token this long (default 300)
+```
+
+**Entra ID client credentials** (`mode = "entra-client-credentials"`): the
+OAuth 2.0 client-credentials grant against
+`https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`; the token is
+cached until its server-issued expiry, then refreshed automatically:
+
+```toml
+[config.endpoints.azure.auth]
+mode = "entra-client-credentials"
+tenant_id = "<tenant-or-uuid>"
+client_id = "<app-registration-client-id>"
+client_secret = "<client-secret>"
+scope = "https://cognitiveservices.azure.com/.default"   # default
+```
+
+**Entra ID managed identity** (`mode = "entra-managed-identity"`): fetches a
+token from the Azure IMDS endpoint — zero credentials in the config; works on
+Azure VMs, App Service, and ACI with a system-assigned identity:
+
+```toml
+[config.endpoints.azure.auth]
+mode = "entra-managed-identity"
+```
+
+Token acquisition is cached process-wide per auth configuration, so a test
+run authenticates once instead of on every LLM call.
+
+Via CLI / env, the runner still supports plain keys and headers:
 
 ```bash
 llm-browser-testkit run tests.toml \
@@ -859,8 +982,6 @@ llm-browser-testkit run tests.toml \
   --llm-header "X-Org-ID:acme" \
   --llm-header "X-Project:qa"
 ```
-
-Via env:
 
 ```bash
 export HARNESS_LLM_API_KEY=sk-...

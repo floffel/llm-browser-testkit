@@ -230,6 +230,31 @@ pub struct EndpointConfig {
     /// cheap primary model with a more powerful/expensive fallback.
     #[serde(default)]
     pub fallbacks: Vec<String>,
+    /// LLM provider protocol: `openai` (default, OpenAI-compatible chat
+    /// completions), `azure` (`Azure` `OpenAI`), or `bedrock` (AWS Bedrock
+    /// Converse API; requires the `aws` cargo feature).
+    #[serde(default)]
+    pub provider: Provider,
+    /// `Azure` `OpenAI` deployment name (`provider = "azure"`). Defaults to
+    /// `model` when unset.
+    #[serde(default)]
+    pub deployment: Option<String>,
+    /// `Azure` `OpenAI` API version (`provider = "azure"`). Defaults to
+    /// `2024-10-21`.
+    #[serde(default)]
+    pub api_version: Option<String>,
+    /// Authentication configuration for LLM endpoints (API key, token
+    /// command, Entra ID client credentials / managed identity).
+    #[serde(default)]
+    pub auth: AuthConfig,
+    /// Extra HTTP headers produced by running a command per call, keyed by
+    /// header name. The command's stdout (first line) becomes the header
+    /// value. Provider-agnostic — applies to every LLM provider.
+    #[serde(default, deserialize_with = "deserialize_headers")]
+    pub header_commands: HashMap<String, String>,
+    /// AWS credential settings (`provider = "bedrock"`).
+    #[serde(default)]
+    pub aws: AwsConfig,
 }
 
 /// Type discriminator for endpoint configuration.
@@ -243,6 +268,117 @@ pub enum EndpointType {
     Mcp,
     /// Agent-to-Agent protocol agent.
     A2a,
+}
+
+/// LLM provider protocol used by an LLM endpoint.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    /// OpenAI-compatible Chat Completions API
+    /// (`POST <url>/v1/chat/completions`).
+    #[default]
+    Openai,
+    /// `Azure` `OpenAI`
+    /// (`POST <url>/openai/deployments/<deployment>/chat/completions`).
+    Azure,
+    /// AWS Bedrock Converse API (`POST https://bedrock-runtime.<region>
+    /// .amazonaws.com/model/<model>/converse`). Requires the `aws` cargo
+    /// feature; uses the standard AWS credential chain unless overridden.
+    Bedrock,
+}
+
+/// Authentication mode for an LLM endpoint.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    /// Static API key. Sent as `Authorization: Bearer <key>` by default;
+    /// set [`AuthConfig::api_key_header`] (or use the `azure` provider)
+    /// to send it in a different header.
+    #[default]
+    ApiKey,
+    /// Execute a command and use its stdout (first line) as the bearer
+    /// token. Uses the `token_command` field. Provider-agnostic escape
+    /// hatch — e.g. `az account get-access-token …`.
+    TokenCommand,
+    /// Entra ID (`Azure` AD) OAuth 2.0 client-credentials grant: exchanges
+    /// `client_id` + `client_secret` in `tenant_id` for a bearer token.
+    EntraClientCredentials,
+    /// Entra ID managed identity: fetches a bearer token from the IMDS
+    /// endpoint (works on `Azure` VMs / App Service / ACI with a
+    /// system-assigned identity; zero credentials in the config).
+    EntraManagedIdentity,
+}
+
+/// Authentication settings for an LLM endpoint.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AuthConfig {
+    /// Which authentication mode to use. Default: `api-key`.
+    #[serde(default)]
+    pub mode: AuthMode,
+    /// Header name that receives the API key instead of
+    /// `Authorization: Bearer` (`mode = "api-key"`). For example the `Azure`
+    /// `OpenAI` `api-key` header.
+    #[serde(default)]
+    pub api_key_header: Option<String>,
+    /// Command whose stdout (first line) is used as the bearer token
+    /// (`mode = "token-command"`).
+    #[serde(default)]
+    pub token_command: Option<String>,
+    /// Entra tenant id (`mode = "entra-client-credentials"`,
+    /// `"entra-managed-identity"`).
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// Entra client id (`mode = "entra-client-credentials"`).
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Entra client secret (`mode = "entra-client-credentials"`).
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Entra token scope. Defaults to
+    /// `https://cognitiveservices.azure.com/.default`.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Override for the Entra token endpoint
+    /// (`mode = "entra-client-credentials"`), default
+    /// `https://login.microsoftonline.com`. Also used as the IMDS identity
+    /// endpoint base for `"entra-managed-identity"` (default
+    /// `http://169.254.169.254`). Mainly useful for tests and proxies.
+    #[serde(default)]
+    pub token_url: Option<String>,
+    /// Seconds to reuse a fetched (non-API-key) token before refetching.
+    /// For Entra modes the server-issued expiry is used when available;
+    /// this caps the reuse window. Default 300.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+}
+
+/// AWS credential and region settings for a `bedrock` provider endpoint.
+///
+/// When no explicit access key is given, the standard AWS credential chain
+/// is used (env vars, shared config `~/.aws/config` + `~/.aws/credentials`,
+/// SSO, ECS/IMDS) — the same behavior as the AWS CLI. `profile` selects a
+/// named profile from the shared config, and `region` overrides the chain
+/// default.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AwsConfig {
+    /// Named profile from `~/.aws/config` / `~/.aws/credentials` to use
+    /// (default: the AWS CLI default selection via `AWS_PROFILE` or
+    /// `default`).
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// AWS region (default: `AWS_REGION` env or the profile's region;
+    /// required if neither is set).
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Explicit access key id (bypasses the credential chain).
+    #[serde(default)]
+    pub access_key_id: Option<String>,
+    /// Explicit secret access key (with `access_key_id`).
+    #[serde(default)]
+    pub secret_access_key: Option<String>,
+    /// Optional session token for explicit temporary credentials.
+    #[serde(default)]
+    pub session_token: Option<String>,
 }
 
 /// Pricing configuration for an endpoint.

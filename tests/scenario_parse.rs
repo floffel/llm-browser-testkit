@@ -451,3 +451,138 @@ steps = [
         other => panic!("expected non-idempotent Click, got {other:?}"),
     }
 }
+
+#[test]
+fn test_endpoint_provider_defaults_to_openai() {
+    let toml = r#"
+[config.endpoints.main]
+type = "llm"
+url = "http://localhost:8080"
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse endpoint");
+    let ep = scenario
+        .config
+        .endpoints
+        .get("main")
+        .expect("endpoint present");
+    assert_eq!(ep.provider, llm_browser_testkit::scenario::Provider::Openai);
+    assert!(ep.deployment.is_none());
+    assert!(ep.api_version.is_none());
+}
+
+#[test]
+fn test_endpoint_azure_provider_parses() {
+    let toml = r#"
+[config.endpoints.azure1]
+type = "llm"
+url = "https://my-resource.openai.azure.com"
+provider = "azure"
+model = "gpt-4o"
+deployment = "my-deployment"
+api_version = "2025-01-01"
+api_key = "sk-azure"
+
+[config.endpoints.azure1.auth]
+mode = "entra-client-credentials"
+tenant_id = "tenant-123"
+client_id = "client-456"
+client_secret = "s3cret"
+scope = "https://cognitiveservices.azure.com/.default"
+
+[config.endpoints.azure1.header_commands]
+X-Rate-Limit-Token = "az account get-access-token --query accessToken -o tsv"
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse azure endpoint");
+    let ep = scenario
+        .config
+        .endpoints
+        .get("azure1")
+        .expect("endpoint present");
+    assert_eq!(ep.provider, llm_browser_testkit::scenario::Provider::Azure);
+    assert_eq!(
+        ep.auth.mode,
+        llm_browser_testkit::scenario::AuthMode::EntraClientCredentials
+    );
+    assert_eq!(ep.deployment.as_deref(), Some("my-deployment"));
+    assert_eq!(ep.api_version.as_deref(), Some("2025-01-01"));
+    assert_eq!(ep.auth.tenant_id.as_deref(), Some("tenant-123"));
+    assert_eq!(
+        ep.auth.scope.as_deref(),
+        Some("https://cognitiveservices.azure.com/.default")
+    );
+    assert_eq!(
+        ep.header_commands
+            .get("X-Rate-Limit-Token")
+            .map(String::as_str),
+        Some("az account get-access-token --query accessToken -o tsv")
+    );
+}
+
+#[test]
+fn test_endpoint_bedrock_provider_parses() {
+    let toml = r#"
+[config.endpoints.bedrock1]
+type = "llm"
+provider = "bedrock"
+model = "anthropic.claude-3-5-sonnet"
+vision = true
+
+[config.endpoints.bedrock1.aws]
+profile = "staging"
+region = "eu-central-1"
+access_key_id = "AKIA... "
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse bedrock endpoint");
+    let ep = scenario
+        .config
+        .endpoints
+        .get("bedrock1")
+        .expect("endpoint present");
+    assert_eq!(
+        ep.provider,
+        llm_browser_testkit::scenario::Provider::Bedrock
+    );
+    assert_eq!(ep.aws.profile.as_deref(), Some("staging"));
+    assert_eq!(ep.aws.region.as_deref(), Some("eu-central-1"));
+    assert!(ep.vision, "vision endpoint flag is provider-agnostic");
+}
+
+#[test]
+fn test_auth_mode_kebab_case_and_api_key_header_parse() {
+    let toml = r#"
+[config.endpoints.main]
+type = "llm"
+url = "http://localhost:8080"
+api_key = "sk-test"
+
+[config.endpoints.main.auth]
+mode = "token-command"
+token_command = "kubectl exec tokenizer -- token"
+"#;
+    let scenario: Scenario = toml::from_str(toml).expect("parse auth config");
+    let ep = scenario
+        .config
+        .endpoints
+        .get("main")
+        .expect("endpoint present");
+    assert_eq!(
+        ep.auth.mode,
+        llm_browser_testkit::scenario::AuthMode::TokenCommand
+    );
+    assert_eq!(
+        ep.auth.token_command.as_deref(),
+        Some("kubectl exec tokenizer -- token")
+    );
+}
+
+#[test]
+fn test_unknown_provider_is_a_parse_error() {
+    let toml = r#"
+[config.endpoints.main]
+type = "llm"
+url = "http://localhost:8080"
+provider = "grok"
+"#;
+    let err = toml::from_str::<Scenario>(toml).expect_err("unknown provider rejected");
+    assert!(err.to_string().contains("unknown variant"), "got: {err}");
+}

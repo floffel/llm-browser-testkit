@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use llm_browser_testkit::endpoints::{EndpointRegistry, TaskType};
 use llm_browser_testkit::llm_chat_vision_with_usage;
@@ -23,13 +22,7 @@ fn config(url: &str) -> LlmConfig {
     LlmConfig {
         url: url.trim_end_matches('/').to_owned(),
         model: "vision-model".to_owned(),
-        api_key: None,
-        headers: HashMap::new(),
-        timeout: Duration::from_secs(10),
-        temperature: 0.0,
-        thinking: None,
-        model_params: HashMap::new(),
-        max_attempts: 3,
+        ..LlmConfig::default()
     }
 }
 

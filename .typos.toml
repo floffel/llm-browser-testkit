@@ -1,2 +1,6 @@
 [files]
 extend-exclude = ["target/", "Cargo.lock"]
+
+[default.extend-words]
+# Azure Container Instances (not a typo).
+ACI = "ACI"

@@ -18,6 +18,11 @@
 
 /// A2A agent protocol client.
 pub mod a2a;
+/// Auth token resolution — Entra ID and token commands for LLM endpoints.
+mod auth;
+/// AWS Bedrock provider (`SigV4`-signed Converse calls; feature `aws`).
+#[cfg(feature = "aws")]
+mod bedrock;
 /// Budget tracking and enforcement.
 pub mod budgets;
 /// Cost calculation, usage tracking, and pricing.
@@ -58,6 +63,10 @@ use serde_json::{json, Value};
 
 pub use costs::LlmResponse;
 pub use costs::LlmUsage;
+pub use scenario::AuthConfig;
+pub use scenario::AuthMode;
+pub use scenario::AwsConfig;
+pub use scenario::Provider;
 
 /// Configuration for the LLM client — bundles URL, model, auth, timeouts,
 /// and provider-specific options into a single struct passed everywhere.
@@ -86,6 +95,46 @@ pub struct LlmConfig {
     /// endpoint). Default 3; override globally with
     /// `HARNESS_LLM_CALL_ATTEMPTS`.
     pub max_attempts: u32,
+    /// LLM provider protocol (defaults to OpenAI-compatible).
+    ///
+    /// `azure` switches to the `Azure` `OpenAI` deployments endpoint, `bedrock`
+    /// to the `SigV4`-signed AWS Bedrock Converse API (feature `aws`).
+    pub provider: Provider,
+    /// `Azure` `OpenAI` deployment name (`Provider::Azure`). Defaults to
+    /// `model` when unset.
+    pub deployment: Option<String>,
+    /// `Azure` `OpenAI` API version (`Provider::Azure`). Defaults to
+    /// `2024-10-21`.
+    pub api_version: Option<String>,
+    /// Authentication configuration (API key, token command, Entra ID).
+    pub auth: AuthConfig,
+    /// Extra HTTP headers produced by running a command per call, keyed by
+    /// header name. Provider-agnostic.
+    pub header_commands: HashMap<String, String>,
+    /// AWS credential settings (`Provider::Bedrock`).
+    pub aws: AwsConfig,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            model: String::new(),
+            api_key: None,
+            headers: HashMap::new(),
+            timeout: Duration::from_secs(60),
+            temperature: 0.0,
+            thinking: None,
+            model_params: HashMap::new(),
+            max_attempts: default_llm_attempts(),
+            provider: Provider::Openai,
+            deployment: None,
+            api_version: None,
+            auth: AuthConfig::default(),
+            header_commands: HashMap::new(),
+            aws: AwsConfig::default(),
+        }
+    }
 }
 
 impl LlmConfig {
@@ -103,8 +152,30 @@ impl LlmConfig {
             thinking: None,
             model_params: HashMap::new(),
             max_attempts: default_llm_attempts(),
+            provider: Provider::Openai,
+            deployment: None,
+            api_version: None,
+            auth: AuthConfig::default(),
+            header_commands: HashMap::new(),
+            aws: AwsConfig::default(),
         }
     }
+}
+
+/// Default `Azure` `OpenAI` API version used when an endpoint does not set
+/// `api_version`.
+pub const DEFAULT_AZURE_API_VERSION: &str = "2024-10-21";
+
+/// Builds the `Azure` `OpenAI` chat completions URL: the resource endpoint
+/// (without `/openai`), the deployment name, and the API version.
+#[must_use]
+pub fn build_azure_url(base: &str, deployment: &str, api_version: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let base = base
+        .strip_suffix("/openai")
+        .unwrap_or(base)
+        .trim_end_matches('/');
+    format!("{base}/openai/deployments/{deployment}/chat/completions?api-version={api_version}")
 }
 
 /// Reads `HARNESS_LLM_CALL_ATTEMPTS` (default 3) — how many times a single
@@ -378,6 +449,10 @@ enum LlmCallError {
     EmptyBody { status: u16 },
     /// Valid JSON but missing `choices[0].message.content`.
     MissingContent { json: String },
+    /// Authentication failure: token command failed, Entra endpoint
+    /// answered with an error, credentials missing, or an unsupported
+    /// provider/feature combination.
+    Auth { message: String },
 }
 
 impl std::fmt::Display for LlmCallError {
@@ -409,6 +484,7 @@ impl std::fmt::Display for LlmCallError {
                 "LLM response missing choices[0].message.content: {}",
                 truncate(json, 300)
             ),
+            Self::Auth { message } => write!(f, "LLM authentication failed: {message}"),
         }
     }
 }
@@ -420,7 +496,10 @@ impl LlmCallError {
     #[must_use]
     fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport { .. } | Self::MissingContent { .. } | Self::EmptyBody { .. } => true,
+            Self::Transport { .. }
+            | Self::MissingContent { .. }
+            | Self::EmptyBody { .. }
+            | Self::Auth { .. } => true,
             Self::Http { status, .. } => {
                 *status == 408 || *status == 429 || (500..600).contains(status)
             }
@@ -439,36 +518,95 @@ async fn llm_chat_once(
     user: &str,
     image_data_url: Option<&str>,
 ) -> Result<LlmResponse, LlmCallError> {
-    let mut payload = serde_json::json!({
-        "model": llm.model,
-        "messages": build_messages(system, user, image_data_url),
-        "max_tokens": 4096,
-        "temperature": llm.temperature
-    });
-    if let Some(think) = llm.thinking {
-        if think {
-            payload["thinking"] = serde_json::json!({"type": "enabled"});
-        } else {
-            payload["thinking"] = serde_json::json!({"type": "disabled"});
+    match llm.provider {
+        Provider::Openai | Provider::Azure => {
+            chat_openai_compat_once(client, llm, system, user, image_data_url).await
+        }
+        Provider::Bedrock => {
+            #[cfg(feature = "aws")]
+            let result = crate::bedrock::chat_once(client, llm, system, user, image_data_url).await;
+            #[cfg(not(feature = "aws"))]
+            let result = Err(LlmCallError::Auth {
+                message:
+                    "provider = \"bedrock\" requires building llm-browser-testkit with the `aws` \
+                     cargo feature"
+                        .to_owned(),
+            });
+            result
         }
     }
-    // Merge provider-specific parameters into the request body.
-    if !llm.model_params.is_empty() {
-        if let Value::Object(ref mut map) = payload {
-            for (key, val) in &llm.model_params {
-                map.insert(key.clone(), val.clone());
+}
+
+/// Single attempt against the OpenAI-compatible path, shared by the
+/// `openai` and `azure` providers (`Azure` differs only in the URL and the
+/// API-key header placement).
+async fn chat_openai_compat_once(
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+    image_data_url: Option<&str>,
+) -> Result<LlmResponse, LlmCallError> {
+    let url = match llm.provider {
+        Provider::Openai => format!("{}/v1/chat/completions", llm.url),
+        Provider::Azure => {
+            let deployment = llm.deployment.clone().unwrap_or_else(|| llm.model.clone());
+            let api_version = llm
+                .api_version
+                .clone()
+                .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_owned());
+            build_azure_url(&llm.url, &deployment, &api_version)
+        }
+        Provider::Bedrock => unreachable!("bedrock is dispatched before this function"),
+    };
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if llm.auth.mode == AuthMode::ApiKey {
+        match (&llm.auth.api_key_header, &llm.api_key) {
+            // Explicit header name wins on every provider.
+            (Some(header_name), Some(key)) => {
+                headers.push((header_name.clone(), key.clone()));
             }
+            (Some(header_name), None) => {
+                return Err(LlmCallError::Auth {
+                    message: format!(
+                        "auth.api_key_header `{header_name}` requires endpoint api_key to be set"
+                    ),
+                });
+            }
+            // Azure classic auth: the key travels in the `api-key` header.
+            (None, Some(key)) if llm.provider == Provider::Azure => {
+                headers.push(("api-key".to_owned(), key.clone()));
+            }
+            // OpenAI-compatible convention.
+            (None, Some(key)) => {
+                headers.push(("Authorization".to_owned(), format!("Bearer {key}")));
+            }
+            (None, None) => {}
         }
-    }
-
-    let mut req = client
-        .post(format!("{}/v1/chat/completions", llm.url))
-        .header("Content-Type", "application/json");
-
-    if let Some(ref key) = llm.api_key {
-        req = req.header("Authorization", format!("Bearer {key}"));
+    } else if let Some(bearer) = auth::resolve_bearer_token(&llm.auth, llm.api_key.as_deref())
+        .await
+        .map_err(|message| LlmCallError::Auth { message })?
+    {
+        headers.push(("Authorization".to_owned(), format!("Bearer {bearer}")));
     }
     for (name, value) in &llm.headers {
+        headers.push((name.clone(), value.clone()));
+    }
+    for (name, command) in &llm.header_commands {
+        let value = auth::run_header_command(command)
+            .await
+            .map_err(|e| LlmCallError::Auth {
+                message: format!("header command for `{name}` failed: {e}"),
+            })?;
+        headers.push((name.clone(), value));
+    }
+
+    let payload = build_openai_payload(llm, system, user, image_data_url);
+
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+
+    for (name, value) in headers {
         req = req.header(name.as_str(), value.as_str());
     }
 
@@ -512,6 +650,39 @@ async fn llm_chat_once(
         })?;
 
     Ok(LlmResponse { content, usage })
+}
+
+/// Builds the OpenAI-compatible chat completions request body (shared by the
+/// `openai` and `azure` providers).
+#[must_use]
+fn build_openai_payload(
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+    image_data_url: Option<&str>,
+) -> Value {
+    let mut payload = serde_json::json!({
+        "model": llm.model,
+        "messages": build_messages(system, user, image_data_url),
+        "max_tokens": 4096,
+        "temperature": llm.temperature
+    });
+    if let Some(think) = llm.thinking {
+        if think {
+            payload["thinking"] = serde_json::json!({"type": "enabled"});
+        } else {
+            payload["thinking"] = serde_json::json!({"type": "disabled"});
+        }
+    }
+    // Merge provider-specific parameters into the request body.
+    if !llm.model_params.is_empty() {
+        if let Value::Object(ref mut map) = payload {
+            for (key, val) in &llm.model_params {
+                map.insert(key.clone(), val.clone());
+            }
+        }
+    }
+    payload
 }
 
 /// JavaScript to extract interactive elements from the current page.
@@ -596,7 +767,10 @@ mod tests {
 
     use crate::costs::extract_usage;
     use crate::truncate;
-    use crate::{default_llm_attempts, llm_base_url, llm_model, parse_headers_env, LlmConfig};
+    use crate::{
+        default_llm_attempts, llm_base_url, llm_model, parse_headers_env, AuthConfig, AwsConfig,
+        LlmConfig, Provider,
+    };
 
     /// Starts a minimal HTTP server that answers every chat-completions
     /// request with `status`/`body`. Returns its base URL.
@@ -635,6 +809,12 @@ mod tests {
             thinking: None,
             model_params: std::collections::HashMap::new(),
             max_attempts: attempts,
+            provider: Provider::Openai,
+            deployment: None,
+            api_version: None,
+            auth: AuthConfig::default(),
+            header_commands: std::collections::HashMap::new(),
+            aws: AwsConfig::default(),
         }
     }
 
