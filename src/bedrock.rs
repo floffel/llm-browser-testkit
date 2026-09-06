@@ -67,7 +67,7 @@ pub async fn chat_once(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> Result<LlmResponse, LlmCallError> {
     let creds = resolve_credentials(&llm.aws)
         .await
@@ -83,7 +83,7 @@ pub async fn chat_once(
         llm.url.trim_end_matches('/').to_owned()
     };
 
-    let payload = build_payload(llm, system, user, image_data_url);
+    let payload = build_payload(llm, system, user, image_data_urls);
     let body = serde_json::to_vec(&payload).map_err(|e| LlmCallError::Auth {
         message: format!("serializing Bedrock payload: {e}"),
     })?;
@@ -288,14 +288,14 @@ fn build_payload(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
     payload.insert(
         "messages".to_owned(),
         serde_json::json!([{
             "role": "user",
-            "content": build_user_content(user, image_data_url),
+            "content": build_user_content(user, image_data_urls),
         }]),
     );
     if !system.is_empty() {
@@ -329,21 +329,23 @@ fn build_payload(
     serde_json::Value::Object(payload)
 }
 
-/// Builds the user content blocks; image data URLs become Converse `image`
-/// blocks with raw base64 bytes.
+/// Builds the user content blocks; image data URLs (ordered from the top
+/// of the page down) become Converse `image` blocks with raw base64 bytes.
 #[must_use]
-fn build_user_content(user: &str, image_data_url: Option<&str>) -> serde_json::Value {
-    let Some(url) = image_data_url else {
+fn build_user_content(user: &str, image_data_urls: Option<&[String]>) -> serde_json::Value {
+    let Some(urls) = image_data_urls else {
         return serde_json::json!([{ "text": user }]);
     };
     let mut blocks = vec![serde_json::json!({ "text": user })];
-    if let Some((format, bytes)) = split_data_url(url) {
-        blocks.push(serde_json::json!({
-            "image": {
-                "format": format,
-                "source": { "bytes": bytes },
-            }
-        }));
+    for url in urls {
+        if let Some((format, bytes)) = split_data_url(url) {
+            blocks.push(serde_json::json!({
+                "image": {
+                    "format": format,
+                    "source": { "bytes": bytes },
+                }
+            }));
+        }
     }
     serde_json::Value::Array(blocks)
 }
@@ -480,11 +482,28 @@ mod tests {
 
     #[test]
     fn content_vision_image_block() {
-        let content = build_user_content("inspect", Some("data:image/png;base64,AAAA"));
+        let urls = vec!["data:image/png;base64,AAAA".to_owned()];
+        let content = build_user_content("inspect", Some(&urls));
         assert_eq!(content[0]["text"], "inspect");
         // base64 "AAAA" decodes to 3 zero bytes, re-encoded identically.
         assert_eq!(content[1]["image"]["format"], "png");
         assert_eq!(content[1]["image"]["source"]["bytes"], "AAAA");
+    }
+
+    #[test]
+    fn content_vision_multiple_image_blocks() {
+        let urls = vec![
+            "data:image/png;base64,AAAA".to_owned(),
+            "data:image/jpeg;base64,SGVsbG8=".to_owned(),
+        ];
+        let content = build_user_content("inspect", Some(&urls));
+        assert_eq!(
+            content.as_array().unwrap().len(),
+            3,
+            "text + one image block per tile"
+        );
+        assert_eq!(content[1]["image"]["format"], "png");
+        assert_eq!(content[2]["image"]["format"], "jpeg");
     }
 
     #[test]

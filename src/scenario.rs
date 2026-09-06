@@ -143,6 +143,20 @@ pub struct ScenarioConfig {
     /// Default: 1400.
     #[serde(default)]
     pub screenshot_max_dimension: Option<u32>,
+    /// Height cap (px) of page coverage for screenshots attached to
+    /// `screenshot = true` assert steps. The full scrollable page is
+    /// captured, then split into viewport-tall tiles (each sent as its own
+    /// image part, ordered from the top) covering at most this many pixels
+    /// — below-the-fold content stays visible to the vision model at 1:1
+    /// detail while token cost stays bounded. Accepts an absolute pixel
+    /// count (`2880`) or a viewport multiple (`"20x"` = twenty times the
+    /// currently applied viewport height, which follows viewport-matrix
+    /// and per-test overrides). A value below the viewport height is
+    /// raised to it, so the visible viewport is always fully included
+    /// (`0` / `"0x"` therefore means "viewport only", the pre-full-page
+    /// behavior). Default: `"20x"`.
+    #[serde(default, deserialize_with = "deserialize_screenshot_max_height")]
+    pub screenshot_max_height: Option<ScreenshotHeight>,
     /// Directory for failure artifacts (screenshots, page snapshots).
     /// Defaults to `artifacts`.
     #[serde(default)]
@@ -169,6 +183,44 @@ pub struct ViewportMatrix {
     /// The viewport variants (`{name, width, height}`).
     #[serde(default)]
     pub viewports: Vec<ViewportDef>,
+}
+
+/// Height cap for screenshots attached to `screenshot = true` assert
+/// steps: either an absolute pixel count or a multiple of the currently
+/// applied viewport height.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScreenshotHeight {
+    /// Absolute height in pixels.
+    Pixels(u32),
+    /// Multiple of the active viewport height (e.g. `2x` = twice the
+    /// current viewport's pixel height).
+    ViewportTimes(f64),
+}
+
+/// Ceiling (px) applied when resolving screenshot height specs, so an
+/// absurdly large multiplier can never overflow or produce an unusable
+/// capture.
+const MAX_SCREENSHOT_HEIGHT: u32 = 4_000_000;
+
+impl ScreenshotHeight {
+    /// Resolves this height spec to a pixel value for the given viewport
+    /// height. Multipliers are rounded and clamped to
+    /// [`MAX_SCREENSHOT_HEIGHT`].
+    #[must_use]
+    pub fn to_px(&self, viewport_height: u32) -> u32 {
+        match self {
+            Self::Pixels(px) => *px,
+            Self::ViewportTimes(mult) => {
+                let scaled = f64::from(viewport_height) * mult;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let px = scaled
+                    .round()
+                    .max(1.0)
+                    .min(f64::from(MAX_SCREENSHOT_HEIGHT)) as u32;
+                px
+            }
+        }
+    }
 }
 
 /// One named viewport size in a matrix.
@@ -511,6 +563,50 @@ where
         Some(Raw::Map(m) | Raw::Table(m)) => m,
         None => HashMap::new(),
     })
+}
+
+fn deserialize_screenshot_max_height<'de, D>(
+    deserializer: D,
+) -> Result<Option<ScreenshotHeight>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(value) => match value.as_u64() {
+            // Integer: absolute pixel count.
+            Some(px) if px <= u64::from(MAX_SCREENSHOT_HEIGHT) => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                Ok(Some(ScreenshotHeight::Pixels(px as u32)))
+            }
+            // String: viewport multiple like "2x" or "1.5x".
+            None => match value.as_str() {
+                Some(s) => {
+                    let lower = s.trim().to_lowercase();
+                    if lower.ends_with('x') {
+                        let num = lower.strip_suffix("x");
+                        if let Some(num) = num {
+                            if let Ok(m) = num.parse::<f64>() {
+                                if m > 0.0 {
+                                    return Ok(Some(ScreenshotHeight::ViewportTimes(m)));
+                                }
+                            }
+                        }
+                    }
+                    Err(serde::de::Error::custom(format_args!(
+                        "screenshot_max_height must be a pixel count (e.g. 2880) or a viewport multiple like \"2x\", found {s:?}"
+                    )))
+                }
+                None => Err(serde::de::Error::custom(format_args!(
+                    "screenshot_max_height must be a pixel count (e.g. 2880) or a viewport multiple like \"2x\", found {value:?}"
+                ))),
+            },
+            Some(_) => Err(serde::de::Error::custom(format_args!(
+                "screenshot_max_height value too large (max {MAX_SCREENSHOT_HEIGHT} px)"
+            ))),
+        },
+    }
 }
 
 /// Reusable assertion definition referenced by name from `assert` steps.

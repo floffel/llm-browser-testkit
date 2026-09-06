@@ -279,17 +279,17 @@ const ASSERTION_PRESETS: &[AssertPreset] = &[
     AssertPreset {
         name: "visual_no_issues",
         system: "You are a visual QA engineer inspecting a website screenshot. Detect clearly visible layout and rendering defects: overlapping elements that hide content or controls, clipped or truncated text, content cut off at the viewport edges, misaligned or broken UI, blank/empty panels where content is expected, broken or missing images, duplicated elements, or rendering glitches. Ignore subjective aesthetics, intentional stacking (dropdowns, tooltips, layered design), and content that is simply not loaded (empty states). Only report defects that a user would actually see or be blocked by.",
-        user_template: "Inspect the attached screenshot and the page text below.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nAre there any clearly visible layout or rendering defects (overlaps, clipping, cut-off content, broken images, blank panels)? Respond with exactly \"PASS\" if the page renders cleanly, or \"FAIL: <describe each defect and where it appears>\" otherwise.",
+        user_template: "Inspect the attached screenshot(s) (ordered from the top of the page down) and the page text below.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nAre there any clearly visible layout or rendering defects (overlaps, clipping, cut-off content, broken images, blank panels)? Respond with exactly \"PASS\" if the page renders cleanly, or \"FAIL: <describe each defect and where it appears>\" otherwise.",
     },
     AssertPreset {
         name: "visual_no_overlaps",
         system: "You are a visual QA engineer inspecting a website screenshot for OVERLAPPING elements that harm usability: one element covering another element's text, buttons, links, or input fields (cookie banners, modals, popovers, chat widgets, sticky headers, or mispositioned layers that hide content or intercept clicks). Ignore intentional, non-harmful stacking (dropdowns, tooltips, badges over avatars, layered design where nothing is hidden or unclickable). Only fail on overlaps that visibly hide content or would block a click.",
-        user_template: "Inspect the attached screenshot and the page text below.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nAre any elements overlapping in a way that hides page content, text, or interactive controls, or that would block clicks? Respond with exactly \"PASS\" if there are no such overlaps, or \"FAIL: <describe the overlapping elements and what they hide>\" otherwise.",
+        user_template: "Inspect the attached screenshot(s) (ordered from the top of the page down) and the page text below.\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nAre any elements overlapping in a way that hides page content, text, or interactive controls, or that would block clicks? Respond with exactly \"PASS\" if there are no such overlaps, or \"FAIL: <describe the overlapping elements and what they hide>\" otherwise.",
     },
     AssertPreset {
         name: "visual_text_visible",
         system: "You are a visual QA engineer inspecting a website screenshot. Determine whether a specific text is FULLY visible and readable: present in the viewport, not clipped, not cut off, not covered by another element, and not obscured by overlays or low contrast stacking. A partial word or a covered text counts as FAIL.",
-        user_template: "Inspect the attached screenshot and the page text below.\n\nTEXT TO CHECK: \"{expected_text}\"\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nIs the text fully visible and readable in the screenshot (not clipped, covered, or hidden)? Respond with exactly \"PASS\" if it is fully visible, or \"FAIL: <explain what hides or clips it>\" otherwise.",
+        user_template: "Inspect the attached screenshot(s) (ordered from the top of the page down) and the page text below.\n\nTEXT TO CHECK: \"{expected_text}\"\n\nURL: {url}\nTitle: {title}\n\nPage Content:\n{content}\n\nIs the text fully visible and readable in the screenshot (not clipped, covered, or hidden)? Respond with exactly \"PASS\" if it is fully visible, or \"FAIL: <explain what hides or clips it>\" otherwise.",
     },
     AssertPreset {
         name: "layout_no_issues",
@@ -824,6 +824,35 @@ impl ScenarioRunner {
         }
     }
 
+    /// Height (px) covered by assert-step screenshots: the configured
+    /// `screenshot_max_height` (absolute px or viewport multiple, default
+    /// `"20x"`) resolved against the currently applied viewport, raised to
+    /// at least the viewport height so the visible screen is always fully
+    /// included. The capture is split into viewport-tall tiles, so this
+    /// value bounds total coverage (and hence the number of image parts).
+    #[must_use]
+    fn screenshot_height_cap(&self) -> u32 {
+        let viewport_height = self.current_viewport_height();
+        let cap = self
+            .config
+            .screenshot_max_height
+            .as_ref()
+            .map_or(viewport_height * 20, |h| h.to_px(viewport_height));
+        cap.max(viewport_height)
+    }
+
+    /// Height of the viewport currently emulated in the browser (falling
+    /// back to the configured default before any emulation was applied).
+    #[must_use]
+    const fn current_viewport_height(&self) -> u32 {
+        let (_, height) = self.applied_viewport.get();
+        if height > 0 {
+            height
+        } else {
+            self.viewport_height
+        }
+    }
+
     // ── step handlers ───────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
@@ -1119,9 +1148,11 @@ impl ScenarioRunner {
 
         let page_content = get_page_text(tab);
 
-        // Vision attach: capture the viewport once per assert step and hand
-        // the JPEG data URL to the preset/prompt evaluation below.
-        let image = if screenshot {
+        // Vision attach: capture the full page once per assert step and
+        // split it into viewport-tall tiles (the total coverage is bounded
+        // by the configured height cap so vision tokens stay sane). All
+        // tile data URLs are handed to the preset/prompt evaluation below.
+        let image: Option<Vec<String>> = if screenshot {
             let endpoint = self
                 .endpoints
                 .resolve(step_endpoint.or(test_endpoint), TaskType::Assertion);
@@ -1135,13 +1166,15 @@ impl ScenarioRunner {
                     ),
                 };
             }
-            match crate::vision::capture_screenshot_data_url(
+            match crate::vision::capture_screenshot_data_urls(
                 tab,
                 self.config
                     .screenshot_max_dimension
                     .unwrap_or(crate::vision::DEFAULT_MAX_DIMENSION),
+                self.screenshot_height_cap(),
+                self.current_viewport_height(),
             ) {
-                Ok(data_url) => Some(data_url),
+                Ok(urls) => Some(urls),
                 Err(e) => {
                     return StepResult {
                         name: "[assert]".into(),
@@ -1209,7 +1242,7 @@ impl ScenarioRunner {
         &self,
         def: &AssertDefinition,
         page_content: &PageContent,
-        image: Option<&str>,
+        image: Option<&[String]>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
         tab: &Tab,
@@ -1286,7 +1319,7 @@ impl ScenarioRunner {
         template: &str,
         assert_text: Option<&str>,
         page_content: &PageContent,
-        image: Option<&str>,
+        image: Option<&[String]>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
@@ -1358,7 +1391,7 @@ impl ScenarioRunner {
         preset_name: &str,
         assert_text: Option<&str>,
         page_content: &PageContent,
-        image: Option<&str>,
+        image: Option<&[String]>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
@@ -1510,7 +1543,7 @@ impl ScenarioRunner {
         &self,
         prompt: &str,
         page_content: &PageContent,
-        image: Option<&str>,
+        image: Option<&[String]>,
         step_endpoint: Option<&str>,
         test_endpoint: Option<&str>,
     ) -> StepResult {
@@ -1821,7 +1854,7 @@ impl ScenarioRunner {
         chain: &[&ResolvedEndpoint],
         system: &str,
         user: &str,
-        image: Option<&str>,
+        image: Option<&[String]>,
         purpose: &str,
     ) -> Result<(crate::costs::LlmResponse, usize), String> {
         if chain.is_empty() {
@@ -1851,7 +1884,7 @@ impl ScenarioRunner {
         let started = Instant::now();
         let sys = system.to_owned();
         let user = user.to_owned();
-        let image = image.map(str::to_owned);
+        let image = image.map(<[String]>::to_vec);
 
         let result = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -1861,8 +1894,14 @@ impl ScenarioRunner {
             let call = async {
                 match image.as_deref() {
                     Some(img) => {
-                        llm_chat_vision_with_usage_chain(&primary, &fallbacks, &sys, &user, img)
-                            .await
+                        llm_chat_vision_with_usage_chain(
+                            &primary,
+                            &fallbacks,
+                            &sys,
+                            &user,
+                            Some(img),
+                        )
+                        .await
                     }
                     None => llm_chat_with_usage_chain(&primary, &fallbacks, &sys, &user).await,
                 }

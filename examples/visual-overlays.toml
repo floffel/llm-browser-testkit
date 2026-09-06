@@ -21,6 +21,11 @@ timeout_secs = 60
 # Screenshots are downscaled to a longest edge of 1400 px before being sent
 # (keeps vision token cost and quality sane).
 screenshot_max_dimension = 1400
+# The full page is captured and split into viewport-tall tiles sent as
+# separate image parts, covering at most this height measured from the top.
+# "20x" = twenty viewport heights (the default); pixel counts like 2880 work
+# too. Cost scales with coverage, so keep it as small as your pages allow.
+screenshot_max_height = "20x"
 
 [config.budgets.per_test_default]
 max_cost = 1.50

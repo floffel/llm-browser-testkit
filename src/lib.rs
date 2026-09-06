@@ -291,9 +291,11 @@ pub async fn llm_chat_with_usage(
     chat_with_retry(llm, system, user, None).await
 }
 
-/// Sends a vision-enabled chat completion request: the user message carries
-/// both the text prompt and a screenshot (JPEG/PNG data URL) as an
-/// OpenAI-compatible `image_url` content part.
+/// Sends a vision-enabled chat completion request.
+///
+/// The user message carries the text prompt and one or more screenshots
+/// (JPEG/PNG data URLs, ordered from the top of the page down) as
+/// OpenAI-compatible `image_url` content parts.
 ///
 /// Retries and error reporting behave like [`llm_chat_with_usage`].
 ///
@@ -306,9 +308,9 @@ pub async fn llm_chat_vision_with_usage(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: &str,
+    image_data_urls: Option<&[String]>,
 ) -> Result<LlmResponse, String> {
-    chat_with_retry(llm, system, user, Some(image_data_url)).await
+    chat_with_retry(llm, system, user, image_data_urls).await
 }
 
 /// Calls a chain of endpoints: the primary [`LlmConfig`] first, then each
@@ -341,9 +343,9 @@ pub async fn llm_chat_vision_with_usage_chain(
     fallbacks: &[LlmConfig],
     system: &str,
     user: &str,
-    image_data_url: &str,
+    image_data_urls: Option<&[String]>,
 ) -> Result<(LlmResponse, usize), String> {
-    chat_chain_with_retry(primary, fallbacks, system, user, Some(image_data_url)).await
+    chat_chain_with_retry(primary, fallbacks, system, user, image_data_urls).await
 }
 
 /// Shared chain loop: try each endpoint (primary then fallbacks) with its
@@ -353,11 +355,11 @@ async fn chat_chain_with_retry(
     fallbacks: &[LlmConfig],
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> Result<(LlmResponse, usize), String> {
     let mut failures: Vec<String> = Vec::new();
     for (i, llm) in std::iter::once(primary).chain(fallbacks.iter()).enumerate() {
-        match chat_with_retry(llm, system, user, image_data_url).await {
+        match chat_with_retry(llm, system, user, image_data_urls).await {
             Ok(resp) => return Ok((resp, i)),
             Err(e) => failures.push(format!("endpoint '{}' ({:?}): {e}", llm.url, llm.model)),
         }
@@ -378,7 +380,7 @@ async fn chat_with_retry(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> Result<LlmResponse, String> {
     let client = http_client(llm.timeout);
     let mut last_err = String::from("LLM call failed");
@@ -386,7 +388,7 @@ async fn chat_with_retry(
 
     while attempts < llm.max_attempts {
         attempts += 1;
-        match llm_chat_once(&client, llm, system, user, image_data_url).await {
+        match llm_chat_once(&client, llm, system, user, image_data_urls).await {
             Ok(resp) => return Ok(resp),
             Err(err) => {
                 // An HTTP 200 with an empty body is a gateway warm-up
@@ -413,16 +415,18 @@ async fn chat_with_retry(
 
 /// Builds the chat messages array. Text-only messages keep the plain
 /// string `content` shape (maximum provider compatibility); vision calls
-/// use the OpenAI-compatible content-part array with a `data:` image URL.
+/// use the OpenAI-compatible content-part array with one `image_url` part
+/// per screenshot (ordered from the top of the page down).
 #[must_use]
-fn build_messages(system: &str, user: &str, image_data_url: Option<&str>) -> Value {
-    let user_content = image_data_url.map_or_else(
+fn build_messages(system: &str, user: &str, image_data_urls: Option<&[String]>) -> Value {
+    let user_content = image_data_urls.map_or_else(
         || Value::String(user.to_owned()),
-        |url| {
-            json!([
-                {"type": "text", "text": user},
-                {"type": "image_url", "image_url": {"url": url}}
-            ])
+        |urls| {
+            let mut parts = vec![json!({"type": "text", "text": user})];
+            for url in urls {
+                parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+            }
+            Value::Array(parts)
         },
     );
     json!([
@@ -518,15 +522,16 @@ async fn llm_chat_once(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> Result<LlmResponse, LlmCallError> {
     match llm.provider {
         Provider::Openai | Provider::Azure => {
-            chat_openai_compat_once(client, llm, system, user, image_data_url).await
+            chat_openai_compat_once(client, llm, system, user, image_data_urls).await
         }
         Provider::Bedrock => {
             #[cfg(feature = "aws")]
-            let result = crate::bedrock::chat_once(client, llm, system, user, image_data_url).await;
+            let result =
+                crate::bedrock::chat_once(client, llm, system, user, image_data_urls).await;
             #[cfg(not(feature = "aws"))]
             let result = Err(LlmCallError::Auth {
                 message:
@@ -547,7 +552,7 @@ async fn chat_openai_compat_once(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> Result<LlmResponse, LlmCallError> {
     let url = match llm.provider {
         Provider::Openai => format!("{}/v1/chat/completions", llm.url),
@@ -604,7 +609,7 @@ async fn chat_openai_compat_once(
         headers.push((name.clone(), value));
     }
 
-    let payload = build_openai_payload(llm, system, user, image_data_url);
+    let payload = build_openai_payload(llm, system, user, image_data_urls);
 
     let mut req = client.post(&url).header("Content-Type", "application/json");
 
@@ -661,11 +666,11 @@ fn build_openai_payload(
     llm: &LlmConfig,
     system: &str,
     user: &str,
-    image_data_url: Option<&str>,
+    image_data_urls: Option<&[String]>,
 ) -> Value {
     let mut payload = serde_json::json!({
         "model": llm.model,
-        "messages": build_messages(system, user, image_data_url),
+        "messages": build_messages(system, user, image_data_urls),
         "max_tokens": 4096,
         "temperature": llm.temperature
     });

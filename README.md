@@ -319,7 +319,8 @@ clipped text, or a cookie banner covering the content are invisible to
 assert step to let the LLM evaluate the actual pixels:
 
 ```toml
-[config]                      # optional: cap the screenshot resolution
+[config]                      # optional: cap the screenshot size
+screenshot_max_height = "20x"  # full page, tiled up to 20× the viewport height
 screenshot_max_dimension = 1400
 
 [config.endpoints.vision]     # MUST declare vision = true
@@ -343,12 +344,28 @@ screenshot = true             # ← attach the viewport screenshot
 
 How it works:
 
-- The viewport is captured as PNG, downscaled in Rust (Lanczos) so its
-  longest edge is at most `screenshot_max_dimension` (default 1400), and
-  re-encoded as quality-85 JPEG — no page JS, deterministic, and cheap on
-  vision tokens.
-- The image is sent as an OpenAI-compatible `image_url` content part next to
-  the text prompt (which still includes the page text for context).
+- The **full scrollable page** is captured in a single CDP call (via the
+  `captureBeyondViewport` flag — nothing below the fold is skipped) and
+  split into viewport-tall tiles from the top, covering at most
+  `screenshot_max_height` (default `"20x"` = twenty viewports).
+- Each tile is downscaled in Rust (Lanczos) so its longest edge is at most
+  `screenshot_max_dimension` (default 1400) and re-encoded as quality-85
+  JPEG — no page JS, deterministic, and every tile keeps 1:1 detail at its
+  own depth (a single downscaled composite would lose all detail past ~4
+  viewport heights). A 14400px page at 720px viewport and `"20x"` sends
+  twenty 1280×720 tiles covering the whole page; `"4x"` sends four tiles
+  covering 2880px. Tile count is hard-capped at 30.
+- The tiles are sent as OpenAI-compatible `image_url` content parts next
+  to the text prompt (which still includes the page text for context),
+  ordered from the top of the page down. Token cost is effectively
+  coverage ÷ viewport height — the cap bounds it. Tile count is hard-capped
+  at 30 so no assertion can ever produce an unbounded request.
+- `screenshot_max_height` accepts an absolute pixel count (`2880`, useful
+  when you know exactly how far down a page is dynamic) or a viewport
+  multiple (`"2x"`, `"20x"` — auto-follows viewport-matrix and per-test
+  viewport overrides). Values below the viewport height are raised to it,
+  so the visible viewport is always fully included (`0` / `"0x"` = exactly
+  the viewport, the pre-full-page behavior).
 - Built-in presets: `visual_no_issues`, `visual_no_overlaps`,
   `visual_text_visible` (uses `assert_text`). Custom `screenshot = true`
   prompts work too.
@@ -761,10 +778,12 @@ llm-browser-testkit run scenario.toml --agent-port 3100
 ```bash
 docker build -t llm-browser-testkit .
 docker run --rm \
+  -p 3100:3100 \
+  -v "$(pwd)/scenario.toml:/scenario.toml:ro" \
   -e HARNESS_LLM_TEST_URL=https://api.openai.com \
   -e HARNESS_LLM_TEST_MODEL=gpt-4o-mini \
   -e HARNESS_LLM_API_KEY=sk-... \
-  llm-browser-testkit run scenario.toml --agent-port 3100 -p 3100:3100
+  llm-browser-testkit run /scenario.toml --agent-port 3100
 ```
 
 A `Dockerfile` is included in the repository — it uses a multi-stage build with
