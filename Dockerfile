@@ -14,7 +14,19 @@ RUN cargo build --release --all-features
 # Runtime stage
 FROM alpine:3.23.5
 
+ARG ENABLE_AWS_CLI=false
+ARG ENABLE_AZURE_CLI=false
+
 RUN apk add --no-cache chromium chromium-chromedriver ca-certificates
+
+RUN if [ "$ENABLE_AWS_CLI" = "true" ]; then \
+        apk add --no-cache aws-cli; \
+    fi
+
+RUN if [ "$ENABLE_AZURE_CLI" = "true" ]; then \
+        apk add --no-cache python3 py3-pip \
+        && pip install --no-cache-dir --break-system-packages azure-cli; \
+    fi
 
 ENV CHROME_BIN=/usr/bin/chromium-browser
 ENV CHROMEDRIVER=/usr/bin/chromedriver

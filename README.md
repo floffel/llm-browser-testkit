@@ -771,6 +771,15 @@ A `Dockerfile` is included in the repository — it uses a multi-stage build wit
 Alpine and Chromium. The image is built with `--all-features`, so all LLM
 providers (including Azure and AWS Bedrock) are available out of the box.
 
+The published image also ships the `aws` and `az` CLIs (useful for
+`auth.mode = "token-command"`, e.g. `az account get-access-token`). Leaner
+variants can be built locally — both are opt-in build args, off by default:
+
+```bash
+docker build -t llm-browser-testkit:aws --build-arg ENABLE_AWS_CLI=true .
+docker build -t llm-browser-testkit:azure --build-arg ENABLE_AZURE_CLI=true .
+```
+
 ## MCP tools
 
 Call MCP server tools directly from test steps to query databases, read files,

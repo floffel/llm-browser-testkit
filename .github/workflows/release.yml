@@ -99,6 +99,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ENABLE_AWS_CLI=true
+            ENABLE_AZURE_CLI=true
 
   release:
     name: Create GitHub release
