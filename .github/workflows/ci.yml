@@ -80,3 +80,56 @@ jobs:
 
       - name: Run typos
         uses: crate-ci/typos@v1.49.0
+
+  docker:
+    name: Docker image (build + smoke test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v7
+
+      - name: Build Docker image (same build args as release)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: llm-browser-testkit:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            ENABLE_AWS_CLI=true
+            ENABLE_AZURE_CLI=true
+
+      - name: Verify binary is on PATH
+        run: |
+          docker run --rm --entrypoint sh llm-browser-testkit:ci -euc '
+            set -e
+            bin=$(command -v llm-browser-testkit)
+            echo "binary: $bin"
+            test "$bin" = "/usr/local/bin/llm-browser-testkit"
+            llm-browser-testkit --help | grep -q "Run a TOML test scenario"
+            test -x /usr/bin/chromium-browser
+            test -x /usr/bin/chromedriver
+            command -v aws
+            command -v az
+          '
+
+      - name: Verify default entrypoint and CMD
+        run: |
+          docker run --rm llm-browser-testkit:ci 2>&1 | tee entrypoint.log
+          grep -q "run passed" entrypoint.log
+
+      - name: Browser smoke test (navigation + screenshot)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/examples/docker-smoke.toml:/docker-smoke.toml:ro" \
+            -v "${{ github.workspace }}/examples/docker-smoke.html:/www/index.html:ro" \
+            --entrypoint sh llm-browser-testkit:ci -euc '
+            set -e
+            llm-browser-testkit run /docker-smoke.toml
+            test -s /tmp/container-smoke.png
+          '

@@ -31,6 +31,11 @@ RUN if [ "$ENABLE_AZURE_CLI" = "true" ]; then \
 ENV CHROME_BIN=/usr/bin/chromium-browser
 ENV CHROMEDRIVER=/usr/bin/chromedriver
 
+# Keep the runtime PATH explicit so the llm-browser-testkit binary (and the
+# entrypoint that resolves it) stays reachable even if the base image's
+# default PATH ever changes.
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 COPY --from=builder /app/target/release/llm-browser-testkit /usr/local/bin/llm-browser-testkit
 COPY default-scenario.toml /default-scenario.toml
 
