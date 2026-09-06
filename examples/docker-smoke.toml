@@ -1,0 +1,23 @@
+# Container smoke test — runs inside the Docker image with zero LLM calls
+# and zero network: the page is served from the container filesystem via
+# file:// and only navigation + screenshot steps are used.
+# Used by the CI "Docker image" job.
+# Standalone: copy to /www/index.html inside the container first, then
+#   llm-browser-testkit run examples/docker-smoke.toml
+
+[config]
+base_url = "file:///www"
+browser_headless = true
+auto_navigate = false
+timeout_secs = 30
+
+[[test]]
+name = "Container smoke"
+
+[[test.steps]]
+kind = "navigate"
+url = "/index.html"
+
+[[test.steps]]
+kind = "screenshot"
+path = "/tmp/container-smoke.png"
