@@ -790,12 +790,14 @@ A `Dockerfile` is included in the repository — it uses a multi-stage build wit
 Alpine and Chromium. The image is built with `--all-features`, so all LLM
 providers (including Azure and AWS Bedrock) are available out of the box.
 
-The image defines **no `ENTRYPOINT`** and defaults to `CMD ["sh"]`, so it can
-be used as a GitHub Actions / Forgejo job container (`container.image`) — a
-oneshot binary entrypoint would exit immediately and the runner would report
-the job container as broken. A bare `docker run` drops into a shell; run a
-scenario in one command by appending the args, e.g.
-`docker run <image> run /scenario.toml --agent-port 3100`.
+The image can be used as a GitHub Actions / Forgejo job container
+(`container.image`): its entrypoint keeps the container alive (`tail -f
+/dev/null`) so the runner can `docker exec` job steps into it, and prints
+the harness version on boot so CI logs always show which image ran. A bare
+`docker run <image>` boots the (idle) container; run a scenario in one
+command by appending the args, e.g.
+`docker run <image> run /scenario.toml --agent-port 3100`. `docker run
+<image> sh` drops into a debugging shell.
 
 The published image also ships the `aws` and `az` CLIs (useful for
 `auth.mode = "token-command"`, e.g. `az account get-access-token`). Leaner

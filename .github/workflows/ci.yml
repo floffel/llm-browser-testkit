@@ -118,10 +118,17 @@ jobs:
             command -v az
           '
 
-      - name: Verify default CMD is a shell (job-container safe)
+      - name: Verify job-container mode (boot alive + version + exec)
         run: |
-          docker inspect -f '{{json .Config.Cmd}}' llm-browser-testkit:ci | grep -q '"sh"'
-          test -z "$(docker inspect -f '{{json .Config.Entrypoint}}' llm-browser-testkit:ci | tr -d '[]"')"
+          docker run -d --name kit-job llm-browser-testkit:ci
+          sleep 1
+          state=$(docker inspect -f '{{.State.Status}}' kit-job)
+          echo "container state: $state"
+          test "$state" = "running"
+          docker logs kit-job 2>&1 | grep -Eq 'llm-browser-testkit [0-9]+\.[0-9]+'
+          docker exec kit-job sh -c 'test -x /usr/local/bin/llm-browser-testkit'
+          docker exec kit-job llm-browser-testkit --help | grep -q "Run a TOML test scenario"
+          docker rm -f kit-job
 
       - name: Browser smoke test (navigation + screenshot)
         run: |

@@ -158,6 +158,9 @@ enum Command {
         #[arg(long, default_value = "auto")]
         color: String,
     },
+
+    /// Print the version.
+    Version,
 }
 
 /// Parses "Name:Value" strings from `--llm-header`.
@@ -194,6 +197,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Version => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+        }
         Command::Run {
             scenario,
             base_url,

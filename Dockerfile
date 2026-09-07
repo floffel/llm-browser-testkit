@@ -38,10 +38,14 @@ ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 COPY --from=builder /app/target/release/llm-browser-testkit /usr/local/bin/llm-browser-testkit
 COPY default-scenario.toml /default-scenario.toml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 3100
-# No ENTRYPOINT: job-container mode (act_runner/GitHub Actions) keeps the
-# image entrypoint, and a oneshot binary entrypoint kills the container.
-# CMD gives a bare `docker run` an interactive shell; running scenarios is
-# still one command: `docker run <image> run /scenario.toml ...`.
-CMD ["sh"]
+# Entrypoint dispatcher: stays alive when used as a job container
+# (act_runner/GitHub Actions `container.image`), prints the version, and
+# forwards args for one-shot CLI use (`docker run <image> run scenario.toml`).
+# No CMD on purpose: an empty command lets the entrypoint tail when booted
+# as a job container; explicitly passed args (e.g. `run ...`) reach the
+# harness untouched.
+ENTRYPOINT ["/entrypoint.sh"]
