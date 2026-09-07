@@ -40,5 +40,8 @@ COPY --from=builder /app/target/release/llm-browser-testkit /usr/local/bin/llm-b
 COPY default-scenario.toml /default-scenario.toml
 
 EXPOSE 3100
-ENTRYPOINT ["llm-browser-testkit"]
-CMD ["run", "/default-scenario.toml"]
+# No ENTRYPOINT: job-container mode (act_runner/GitHub Actions) keeps the
+# image entrypoint, and a oneshot binary entrypoint kills the container.
+# CMD gives a bare `docker run` an interactive shell; running scenarios is
+# still one command: `docker run <image> run /scenario.toml ...`.
+CMD ["sh"]

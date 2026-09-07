@@ -118,10 +118,10 @@ jobs:
             command -v az
           '
 
-      - name: Verify default entrypoint and CMD
+      - name: Verify default CMD is a shell (job-container safe)
         run: |
-          docker run --rm llm-browser-testkit:ci 2>&1 | tee entrypoint.log
-          grep -q "run passed" entrypoint.log
+          docker inspect -f '{{json .Config.Cmd}}' llm-browser-testkit:ci | grep -q '"sh"'
+          test -z "$(docker inspect -f '{{json .Config.Entrypoint}}' llm-browser-testkit:ci | tr -d '[]"')"
 
       - name: Browser smoke test (navigation + screenshot)
         run: |
