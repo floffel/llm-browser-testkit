@@ -70,9 +70,9 @@ const LAYOUT_SCAN_JS: &str = r#"
   if (!vw || !vh) return JSON.stringify(issues);
   const de = document.documentElement;
   // 1. Page-level horizontal overflow.
-  if (de.scrollWidth > vw + 2)
+  if (maxSW > vw + 2)
     push('page-overflow-x', de,
-      'page scrollWidth ' + de.scrollWidth + ' exceeds viewport width ' + vw);
+      'page scrollWidth ' + maxSW + ' exceeds viewport width ' + vw);
   // Class-name prefixes to skip (injected; default = Angular CDK
   // screen-reader helpers, which are intentionally 1x1 / off-screen).
   const ignorePrefixes = __IGNORE_CLASSES__;
@@ -81,8 +81,52 @@ const LAYOUT_SCAN_JS: &str = r#"
     const classes = el.className.trim().split(/\s+/);
     return classes.some((c) => ignorePrefixes.some((p) => c.startsWith(p)));
   };
-  const vScrollable = de.scrollHeight > vh + 2;
-  const hScrollable = de.scrollWidth > vw + 2;
+  const body = document.body;
+  // The document element is not always the scroll container: the app may
+  // scroll via <body> (html{overflow:hidden} + body scroll, e.g. sticky
+  // navs) or via an inner overflow-y:auto panel. Never treat those pages as
+  // "not scrollable" — measure the scrollable content height/width of the
+  // document element AND the body, and take the max.
+  const maxSH = Math.max(de.scrollHeight, body ? body.scrollHeight : 0);
+  const maxSW = Math.max(de.scrollWidth, body ? body.scrollWidth : 0);
+  const vScrollable = maxSH > vh + 2;
+  const hScrollable = maxSW > vw + 2;
+  // True when an ancestor panel (overflow:auto/scroll/overlay) can scroll
+  // this element into view on the given axis — i.e. the element is inside a
+  // scrolling region, so lying beyond the viewport cut is not a defect.
+  const reachableByScroller = (el, axis) => {
+    const ovProp = axis === 'y' ? 'overflowY' : 'overflowX';
+    const dim = axis === 'y' ? 'scrollHeight' : 'scrollWidth';
+    const dimClient = axis === 'y' ? 'clientHeight' : 'clientWidth';
+    let p = el.parentElement;
+    while (p && p !== body) {
+      const pcs = getComputedStyle(p);
+      const o = pcs[ovProp];
+      if ((o === 'auto' || o === 'scroll' || o === 'overlay') &&
+          p[dim] > p[dimClient] + 2) return true;
+      p = p.parentElement;
+    }
+    return false;
+  };
+  const selfOverflowing = (el, cs, axis) => {
+    const ov = axis === 'y' ? cs.overflowY : cs.overflowX;
+    const dim = axis === 'y' ? 'scrollHeight' : 'scrollWidth';
+    const dimClient = axis === 'y' ? 'clientHeight' : 'clientWidth';
+    return (ov === 'auto' || ov === 'scroll' || ov === 'overlay') &&
+      el[dim] > el[dimClient] + 2;
+  };
+  // True when an ancestor clips this axis with overflow:hidden/clip — the
+  // element's overhang is not visible, so treat it as reachable.
+  const clippedByAncestor = (el, axis) => {
+    const ovProp = axis === 'y' ? 'overflowY' : 'overflowX';
+    let p = el.parentElement;
+    while (p && p !== body) {
+      const o = getComputedStyle(p)[ovProp];
+      if (o === 'hidden' || o === 'clip') return true;
+      p = p.parentElement;
+    }
+    return false;
+  };
   const all = Array.prototype.slice.call(document.querySelectorAll('body *'));
   const visible = (cs) => cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity || '1') !== 0;
   const hasContent = (el) =>
@@ -103,7 +147,13 @@ const LAYOUT_SCAN_JS: &str = r#"
       const overLeft = -r.left;
       const overRight = r.right - vw;
       const overBottom = r.bottom - vh;
-      if (overTop > 2 || overLeft > 2 || overRight > 2 || overBottom > 2) {
+      // Top/left overshoot is never reachable; bottom/right overshoot is
+      // only a defect when the fixed element cannot scroll that content
+      // into view itself (e.g. an opened Material drawer whose inner
+      // container scrolls is not a "cut-off" defect).
+      if (overTop > 2 || overLeft > 2 ||
+          (overRight > 2 && !selfOverflowing(el, cs, 'x')) ||
+          (overBottom > 2 && !selfOverflowing(el, cs, 'y'))) {
         let where = '';
         if (overTop > 2 && overLeft > 2) where = 'top+left edges';
         else if (overTop > 2) where = 'top edge (' + Math.round(r.top) + ' < 0)';
@@ -135,7 +185,7 @@ const LAYOUT_SCAN_JS: &str = r#"
     // Right-edge overflow is only a defect when the page cannot scroll
     // horizontally to reveal it (or the element sticks out past the
     // scrollable content width itself).
-    if (overRight > 2 && (!hScrollable || r.right > de.scrollWidth + 2)) {
+    if (overRight > 2 && (!hScrollable || r.right > maxSW + 2) && !reachableByScroller(el, 'x') && !clippedByAncestor(el, 'x')) {
       push('element-out-of-viewport', el,
         'extends ' + overRight.toFixed(0) + 'px past the right edge (' + Math.round(r.right) + ' > ' + vw + ')');
       continue;
@@ -143,7 +193,7 @@ const LAYOUT_SCAN_JS: &str = r#"
     // Below-the-fold content on a scrollable page is normal (tall landing
     // pages); only flag bottom overflow the user can never scroll to.
     const overBottom = r.bottom - vh;
-    if (overBottom > 2 && (!vScrollable || r.bottom > de.scrollHeight + 2)) {
+    if (overBottom > 2 && (!vScrollable || r.bottom > maxSH + 2) && !reachableByScroller(el, 'y') && !clippedByAncestor(el, 'y')) {
       push('element-out-of-viewport', el,
         'extends ' + overBottom.toFixed(0) + 'px past the bottom edge (' + Math.round(r.bottom) + ' > ' + vh + ')');
     }
@@ -155,6 +205,9 @@ const LAYOUT_SCAN_JS: &str = r#"
     if (cs.overflowX !== 'hidden' && cs.overflowY !== 'hidden') continue;
     if (el.scrollWidth <= el.clientWidth + 2 && el.scrollHeight <= el.clientHeight + 2) continue;
     if (!(el.textContent || '').trim()) continue;
+    // Single-line truncation with an ellipsis is an intentional design
+    // pattern (Tailwind .truncate etc.), not a clipping defect.
+    if (cs.textOverflow === 'ellipsis') continue;
     push('text-clipped', el,
       'content ' + el.scrollWidth + 'x' + el.scrollHeight +
       ' clipped to ' + el.clientWidth + 'x' + el.clientHeight);
