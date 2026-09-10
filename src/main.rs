@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use llm_browser_testkit::reporting::{ColorMode, Level, Reporter};
 use serde_json::Value;
 use std::sync::Arc;
