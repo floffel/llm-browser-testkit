@@ -172,9 +172,22 @@ impl EndpointRegistry {
                 url: ec
                     .url
                     .clone()
-                    .unwrap_or_else(|| match ec.endpoint_type {
-                        EndpointType::Llm => crate::llm_base_url(),
-                        EndpointType::A2a | EndpointType::Mcp => String::new(),
+                    .unwrap_or_else(|| {
+                        if ec.provider == Provider::Bedrock {
+                            // Bedrock builds its URL from region + model
+                            // (https://bedrock-runtime.<region>.amazonaws.com/
+                            // model/<model>/converse). Substituting the
+                            // OpenAI-compatible base URL here would send the
+                            // SigV4-signed Converse request to the wrong host
+                            // (observed: the exo gateway's FastAPI root answers
+                            // 405 {"detail":"Method Not Allowed"}).
+                            String::new()
+                        } else {
+                            match ec.endpoint_type {
+                                EndpointType::Llm => crate::llm_base_url(),
+                                EndpointType::A2a | EndpointType::Mcp => String::new(),
+                            }
+                        }
                     })
                     .trim_end_matches('/')
                     .to_owned(),
