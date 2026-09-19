@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use headless_chrome::{Browser, LaunchOptions, Tab};
@@ -21,6 +21,28 @@ use crate::selectors::{sanitize_selector, selector_is_useless, validate_selector
 use crate::truncate;
 use crate::LlmConfig;
 use crate::DOM_EXTRACT_JS;
+
+/// Formats a UNIX epoch timestamp as an RFC 3339 UTC string
+/// (`2026-09-19T16:04:00Z`) without pulling in a date dependency.
+/// Civil-from-days conversion after Howard Hinnant.
+#[must_use]
+#[allow(clippy::many_single_char_names)]
+fn unix_to_rfc3339(secs: u64) -> String {
+    let secs = i64::try_from(secs).unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m, s) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mth <= 2);
+    format!("{y:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
 
 /// One detected layout defect (`layout_no_issues` preset).
 #[derive(Debug, serde::Deserialize)]
@@ -271,6 +293,9 @@ pub struct ScenarioRunner {
     reporter: Arc<Reporter>,
     /// The test + step index currently executing, for LLM-call events.
     current_step: std::cell::RefCell<Option<(String, u32)>>,
+    /// Epoch seconds of runner creation — constant for the whole run so
+    /// the LLM context preamble below is cacheable by upstream providers.
+    run_started: u64,
 }
 
 /// Aggregated results from a scenario run.
@@ -426,6 +451,9 @@ impl ScenarioRunner {
             ),
             reporter,
             current_step: std::cell::RefCell::new(None),
+            run_started: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
         }
     }
 
@@ -1901,6 +1929,27 @@ impl ScenarioRunner {
     ///
     /// Emits an `LlmCallStarted`/`LlmCallFinished` event pair so the report
     /// shows duration, tokens, cost and the answering endpoint per call.
+    /// Run-level context handed to every LLM call as the FIRST block of the
+    /// user message. Contents that are stable for the whole run ("run
+    /// started", "target site") come first so upstream provider prefix
+    /// caching stays effective; the current time is the last line because
+    /// it changes on every call.
+    fn run_context(&self) -> String {
+        let mut parts = vec![
+            "RUN CONTEXT (use this to interpret the page, never repeat it back)".into(),
+            "================================================================".into(),
+            format!("Run started: {} UTC", unix_to_rfc3339(self.run_started)),
+        ];
+        if let Some(base) = self.config.base_url.as_deref() {
+            parts.push(format!("Target site: {base}"));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        parts.push(format!("Current time: {} UTC", unix_to_rfc3339(now)));
+        parts.join("\n")
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     fn llm_call_chain(
         &self,
@@ -1936,7 +1985,12 @@ impl ScenarioRunner {
 
         let started = Instant::now();
         let sys = system.to_owned();
-        let user = user.to_owned();
+        let context = self.run_context();
+        let user = if context.is_empty() {
+            user.to_owned()
+        } else {
+            format!("{context}\n\n{user}")
+        };
         let image = image.map(<[String]>::to_vec);
 
         let result = std::thread::spawn(move || {
@@ -2301,4 +2355,23 @@ struct PageContent {
     url: String,
     title: String,
     body_text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unix_to_rfc3339;
+
+    #[test]
+    fn rfc3339_epoch_and_reference_dates() {
+        assert_eq!(unix_to_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(unix_to_rfc3339(1_736_840_000), "2025-01-14T07:33:20Z");
+        assert_eq!(unix_to_rfc3339(1_784_469_000), "2026-07-19T13:50:00Z");
+        assert_eq!(unix_to_rfc3339(9_999_999_999), "2286-11-20T17:46:39Z");
+    }
+
+    #[test]
+    fn rfc3339_handles_leap_years() {
+        assert_eq!(unix_to_rfc3339(1_582_905_600), "2020-02-28T16:00:00Z");
+        assert_eq!(unix_to_rfc3339(1_707_408_000), "2024-02-08T16:00:00Z");
+    }
 }
