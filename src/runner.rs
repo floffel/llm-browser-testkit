@@ -296,6 +296,11 @@ pub struct ScenarioRunner {
     /// Epoch seconds of runner creation — constant for the whole run so
     /// the LLM context preamble below is cacheable by upstream providers.
     run_started: u64,
+    /// Whether this runner emits the `RunStarted`/`RunFinished` events.
+    /// When several scenario files are run concurrently by
+    /// [`crate::parallel::run_scenarios`], the orchestrator owns those two
+    /// events (one per batch), so each per-file runner suppresses its own.
+    emit_run_events: bool,
 }
 
 /// Aggregated results from a scenario run.
@@ -316,7 +321,7 @@ pub struct RunReport {
 }
 
 /// Result of a single step execution.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StepResult {
     /// The step name.
     pub name: String,
@@ -393,6 +398,30 @@ impl ScenarioRunner {
         definitions: Vec<AssertDefinition>,
         reporter: Arc<Reporter>,
     ) -> Self {
+        Self::with_reporter_mode(scenario_config, definitions, reporter, true)
+    }
+
+    /// Creates a runner that reports run events through the given reporter
+    /// but suppresses the `RunStarted`/`RunFinished` events. Used by the
+    /// parallel orchestrator, which emits those once per batch.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn with_reporter_parallel(
+        scenario_config: ScenarioConfig,
+        definitions: Vec<AssertDefinition>,
+        reporter: Arc<Reporter>,
+    ) -> Self {
+        Self::with_reporter_mode(scenario_config, definitions, reporter, false)
+    }
+
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    fn with_reporter_mode(
+        scenario_config: ScenarioConfig,
+        definitions: Vec<AssertDefinition>,
+        reporter: Arc<Reporter>,
+        emit_run_events: bool,
+    ) -> Self {
         reporter.add_redaction_secrets(crate::redact::collect_secrets_from_scenario_config(
             &scenario_config,
         ));
@@ -454,6 +483,7 @@ impl ScenarioRunner {
             run_started: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            emit_run_events,
         }
     }
 
@@ -490,22 +520,26 @@ impl ScenarioRunner {
 
         if tests.is_empty() {
             self.reporter.warn("No tests defined in scenario.");
-            self.emit_event(&TestEvent::RunFinished {
-                tests_passed: 0,
-                tests_failed: 0,
-                steps_passed: 0,
-                steps_failed: 0,
-                steps_skipped: 0,
-                total_cost: 0.0,
-                total_tokens: 0,
-                total_calls: 0,
-            });
+            if self.emit_run_events {
+                self.emit_event(&TestEvent::RunFinished {
+                    tests_passed: 0,
+                    tests_failed: 0,
+                    steps_passed: 0,
+                    steps_failed: 0,
+                    steps_skipped: 0,
+                    total_cost: 0.0,
+                    total_tokens: 0,
+                    total_calls: 0,
+                });
+            }
             return Ok(report);
         }
 
-        self.emit_event(&TestEvent::RunStarted {
-            total_tests: tests.len() as u32,
-        });
+        if self.emit_run_events {
+            self.emit_event(&TestEvent::RunStarted {
+                total_tests: tests.len() as u32,
+            });
+        }
 
         let browser_headless = self.config.browser_headless.unwrap_or(true);
 
@@ -600,16 +634,18 @@ impl ScenarioRunner {
         }
 
         let global = self.usage.global_snapshot();
-        self.emit_event(&TestEvent::RunFinished {
-            tests_passed: report.tests_passed,
-            tests_failed: report.tests_failed,
-            steps_passed: report.passed,
-            steps_failed: report.failed,
-            steps_skipped: report.skipped,
-            total_cost: global.total_cost,
-            total_tokens: global.total_tokens,
-            total_calls: global.total_calls,
-        });
+        if self.emit_run_events {
+            self.emit_event(&TestEvent::RunFinished {
+                tests_passed: report.tests_passed,
+                tests_failed: report.tests_failed,
+                steps_passed: report.passed,
+                steps_failed: report.failed,
+                steps_skipped: report.skipped,
+                total_cost: global.total_cost,
+                total_tokens: global.total_tokens,
+                total_calls: global.total_calls,
+            });
+        }
 
         Ok(report)
     }

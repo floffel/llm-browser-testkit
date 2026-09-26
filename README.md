@@ -21,6 +21,7 @@ llm-browser-testkit run smoke.toml
 - [MCP tools](#mcp-tools)
 - [MCP server](#mcp-server-exposure)
 - [Cost tracking & budgets](#cost-tracking--budgets)
+- [Parallel runs](#parallel-runs)
 - [How it works](#how-it-works)
 - [Use as a library](#use-as-a-library)
 - [LLM authentication](#llm-authentication)
@@ -499,11 +500,14 @@ assert_text = "Welcome back"
 ## CLI reference
 
 ```
-llm-browser-testkit run <scenario.toml> [OPTIONS]
+llm-browser-testkit run <scenario.toml> [<scenario2.toml> ...] [OPTIONS]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--parallel` | auto | Exact max number of scenario files to run concurrently. Omit it to **auto-scale** to the machine: the runner probes available memory, learns the real per-browser footprint by trial and error, and throttles itself (never assuming a fixed size per page). See [Parallel runs](#parallel-runs). |
+| `--parallel-min` | `1` | Lower bound for auto-scaling (ignored when `--parallel` is set). |
+| `--parallel-max` | `0` | Upper bound for auto-scaling; `0` = unlimited (ignored when `--parallel` is set). |
 | `--llm-url` | `$HARNESS_LLM_TEST_URL` or `http://localhost:8080` | OpenAI-compatible endpoint |
 | `--llm-model` | `$HARNESS_LLM_TEST_MODEL` or `deepseek` | Model name |
 | `--llm-api-key` | `$HARNESS_LLM_API_KEY` | API key (Bearer token) |
@@ -912,9 +916,68 @@ llm-browser-testkit run scenario.toml --max-cost 10.0 --max-tokens 1000000 --bud
   GLOBAL SUMMARY
     Total cost:     $0.1014
     Total tokens:   5,801
-    Total calls:    10
--------------------------------
+Total calls:    10
+------------------------------
 ```
+
+## Parallel runs
+
+Pass several scenario files to run them concurrently. Each file executes on
+its **own isolated browser** (a separate Chrome process), so cookies,
+localStorage, and other session state can never leak between files. The
+steps inside each file still run sequentially on that file's browser.
+
+```console
+llm-browser-testkit run checkout.toml search.toml cart.toml
+```
+
+All files in one batch share the same CLI overrides and report as a single
+run: one `RunStarted`/`RunFinished` event, one merged cost report, and a
+combined exit code (non-zero if any file failed).
+
+### Auto-scaling concurrency
+
+By default the runner **auto-scales** to the machine rather than assuming
+each browser costs a fixed amount of memory, and it is parallel out of the
+box:
+
+1. It probes available physical memory once (Linux `free`, macOS
+   `sysctl`/`vm_stat`).
+2. Around each file it measures how much memory one browser actually holds
+   (`available` before minus after), folding that into a learned, clamped
+   per-browser footprint.
+3. After each success it raises the concurrency limit toward
+   `available ÷ footprint`; when memory can't be measured it ramps up one
+   browser at a time (up to a default ceiling of 8).
+4. It **guards** launches: a new browser is not started while less than an
+   absolute 256 MiB is free, or when there is no room for one more browser
+   of the learned footprint. The guard uses absolute free bytes — never a
+   fraction of `total` memory — so it behaves correctly inside VMs and
+   containers, where `total` often reports the host's much larger RAM.
+5. If a launch fails with an out-of-memory-style error it **halves the
+   limit** and **retries the file** with backoff (up to 3 attempts) before
+   reporting it failed.
+
+The bounds are configurable: `--parallel-min N` / `--parallel-max N`
+(default `1` / unlimited). Pin an exact count with `--parallel N`, which
+disables auto-scaling (the memory guard and retries still apply).
+
+### Controlling which files may overlap
+
+By default every file has its own implicit group, so distinct files run in
+parallel. When several files touch the **same shared backend state** (e.g.
+they all mutate the same checkout ledger) and would interfere if run at the
+same time, give them a concurrency group — files that declare the same group
+are never executed concurrently:
+
+```toml
+[config]
+concurrency_group = "checkout"   # files sharing this group never overlap
+```
+
+Files with no `concurrency_group` (or different groups) may still run at the
+same time, subject to `--parallel`. The limit only caps how many files run at
+once; it does not schedule the order of files within a group.
 
 ## How it works
 

@@ -12,7 +12,12 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{ArgAction, Parser, Subcommand};
+use llm_browser_testkit::parallel::{RunOptions, ScenarioFile};
 use llm_browser_testkit::reporting::{ColorMode, Level, Reporter};
+use llm_browser_testkit::scenario::{
+    A2aServerConfig, BudgetDef, BudgetEnforcement, EndpointConfig, EndpointType, Scenario,
+    ScenarioConfig, TestGroup,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -31,8 +36,30 @@ struct Cli {
 enum Command {
     /// Run a TOML test scenario in a real browser.
     Run {
-        /// Path to the scenario file.
-        scenario: PathBuf,
+        /// Path(s) to the scenario file(s). Pass several to run them
+        /// concurrently (see `--parallel`); each file runs on its own
+        /// isolated browser so cookies and session state never interfere.
+        scenario: Vec<PathBuf>,
+
+        /// Exact maximum number of scenario files to run at the same time.
+        /// When omitted, concurrency auto-scales to the machine's available
+        /// memory (bounded by `--parallel-min` / `--parallel-max`), learning
+        /// the real per-browser footprint by trial and error and retrying
+        /// out-of-memory launch failures. Each file runs on its own isolated
+        /// browser; per-file `[config] concurrency_group` values keep files
+        /// that touch the same shared backend state from overlapping.
+        #[arg(long)]
+        parallel: Option<u32>,
+
+        /// Lower bound for auto-scaling concurrency (used only when
+        /// `--parallel` is omitted). Default: 1.
+        #[arg(long, default_value = "1")]
+        parallel_min: u32,
+
+        /// Upper bound for auto-scaling concurrency (used only when
+        /// `--parallel` is omitted). `0` means unlimited. Default: 0.
+        #[arg(long, default_value = "0")]
+        parallel_max: u32,
 
         /// Base URL for relative navigation
         /// (default: `HARNESS_BROWSER_BASE_URL` or localhost:4200).
@@ -192,6 +219,263 @@ fn parse_model_param(s: &str) -> Result<(String, Value), String> {
     Ok((key, val))
 }
 
+/// The CLI flags that override a scenario's `[config]`, applied to every
+/// scenario file before it runs (so a batch shares the same overrides).
+struct RunOverrides {
+    base_url: Option<String>,
+    llm_url: Option<String>,
+    llm_model: Option<String>,
+    llm_api_key: Option<String>,
+    llm_fallback_url: Option<String>,
+    llm_fallback_model: Option<String>,
+    llm_fallback_api_key: Option<String>,
+    llm_headers: Vec<(String, String)>,
+    model_params: Vec<(String, Value)>,
+    headless: bool,
+    timeout: u64,
+    viewport_width: u32,
+    viewport_height: u32,
+    start_url: String,
+    max_cost: Option<f64>,
+    max_tokens: Option<u64>,
+    budget_enforcement: Option<String>,
+    agent_port: Option<u16>,
+    artifacts_dir: Option<String>,
+    continue_on_failure: bool,
+}
+
+/// Builds a scenario's effective global config by applying CLI overrides on
+/// top of the scenario `[config]`. CLI flags win; per-scenario values keep
+/// their precedence for anything the CLI did not set.
+fn apply_cli_overrides(config: ScenarioConfig, o: &RunOverrides) -> ScenarioConfig {
+    let mut config = config;
+    config.base_url = o.base_url.clone().or(config.base_url);
+    config.llm_url = o.llm_url.clone().or(config.llm_url);
+    config.llm_model = o.llm_model.clone().or(config.llm_model);
+    config.llm_api_key = o.llm_api_key.clone().or(config.llm_api_key);
+    // Fallback endpoint: only meaningful when the scenario declares
+    // no [config.endpoints] table (with a table, per-endpoint
+    // `fallbacks = [...]` is the declarative form). Synthesize a
+    // two-endpoint table here so CLI/env fallback settings behave
+    // exactly like the declarative chain.
+    if let Some(fb_url) = nonempty(o.llm_fallback_url.clone()) {
+        if config.endpoints.is_empty() {
+            let mut endpoints = std::collections::HashMap::new();
+            endpoints.insert(
+                "default".to_owned(),
+                EndpointConfig {
+                    endpoint_type: EndpointType::Llm,
+                    url: config.llm_url.clone(),
+                    model: config.llm_model.clone(),
+                    api_key: config.llm_api_key.clone(),
+                    headers: config.llm_headers.clone(),
+                    default_for: vec!["targeting".to_owned(), "assertion".to_owned()],
+                    fallbacks: vec!["fallback".to_owned()],
+                    ..Default::default()
+                },
+            );
+            endpoints.insert(
+                "fallback".to_owned(),
+                EndpointConfig {
+                    endpoint_type: EndpointType::Llm,
+                    url: Some(fb_url),
+                    model: nonempty(o.llm_fallback_model.clone()),
+                    api_key: nonempty(o.llm_fallback_api_key.clone()),
+                    default_for: Vec::new(),
+                    ..Default::default()
+                },
+            );
+            config.endpoints = endpoints;
+        }
+    }
+    if !o.llm_headers.is_empty() {
+        let mut headers = config.llm_headers;
+        for (k, v) in o.llm_headers.clone() {
+            headers.insert(k, v);
+        }
+        config.llm_headers = headers;
+    }
+    if !o.model_params.is_empty() {
+        let mut params = config.model_params;
+        for (k, v) in o.model_params.clone() {
+            params.insert(k, v);
+        }
+        config.model_params = params;
+    }
+    config.browser_headless = Some(o.headless);
+    config.timeout_secs = Some(o.timeout.max(config.timeout_secs.unwrap_or(60)));
+    config.viewport_width = Some(o.viewport_width.max(config.viewport_width.unwrap_or(1280)));
+    config.viewport_height = Some(o.viewport_height.max(config.viewport_height.unwrap_or(720)));
+    if config.start_url.is_none() {
+        config.start_url = Some(o.start_url.clone());
+    }
+
+    // CLI budget overrides
+    let enforce = o
+        .budget_enforcement
+        .as_deref()
+        .map(|e| match e.to_lowercase().as_str() {
+            "soft" => BudgetEnforcement::Soft,
+            _ => BudgetEnforcement::Hard,
+        });
+    if o.max_cost.is_some() || o.max_tokens.is_some() || enforce.is_some() {
+        let global = config.budgets.global.get_or_insert(BudgetDef {
+            max_cost: None,
+            max_tokens: None,
+            max_calls: None,
+            enforcement: None,
+        });
+        if let Some(mc) = o.max_cost {
+            global.max_cost = Some(mc);
+        }
+        if let Some(mt) = o.max_tokens {
+            global.max_tokens = Some(mt);
+        }
+        if let Some(e) = enforce {
+            global.enforcement = Some(e);
+        }
+    }
+
+    // CLI A2A server override
+    if let Some(port) = o.agent_port {
+        config.a2a_server = Some(A2aServerConfig {
+            enabled: true,
+            port,
+        });
+    }
+
+    // CLI failure-behavior overrides (only when the flag was passed,
+    // so per-scenario [config] values keep their precedence).
+    if let Some(dir) = o.artifacts_dir.clone() {
+        config.artifacts_dir = Some(dir);
+    }
+    if o.continue_on_failure {
+        config.continue_on_failure = true;
+    }
+    config
+}
+
+/// Expands `[config.viewport_matrix]` into one test variant per named
+/// viewport (each gets a ` — <name>` suffix). Prints a summary line when the
+/// matrix is active. Returns the (possibly expanded) test list.
+#[allow(clippy::cast_possible_truncation)]
+fn expand_viewport_matrix(
+    config: &ScenarioConfig,
+    tests: Vec<TestGroup>,
+    reporter: &Reporter,
+) -> Vec<TestGroup> {
+    let mut expanded = tests;
+    if let Some(matrix) = &config.viewport_matrix {
+        if !matrix.viewports.is_empty() {
+            let mut out: Vec<TestGroup> = Vec::new();
+            for test in expanded {
+                for vp in &matrix.viewports {
+                    let mut variant = test.clone();
+                    variant.name = format!("{} — {}", test.name, vp.name);
+                    variant.viewport_width = Some(vp.width);
+                    variant.viewport_height = Some(vp.height);
+                    out.push(variant);
+                }
+            }
+            expanded = out;
+            reporter.info(format!(
+                "Viewport matrix: {} variants per test ({})",
+                matrix.viewports.len(),
+                matrix
+                    .viewports
+                    .iter()
+                    .map(|v| format!("{}={}x{}", v.name, v.width, v.height))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+    }
+    expanded
+}
+
+/// Prints the per-scenario summary header (artifacts, base URL, endpoints,
+/// browser, start URL, test/definition counts, budgets).
+#[allow(clippy::cast_possible_truncation)]
+fn print_scenario_header(
+    reporter: &Reporter,
+    config: &ScenarioConfig,
+    tests_len: usize,
+    definitions_len: usize,
+) {
+    let artifacts_dir = config
+        .artifacts_dir
+        .clone()
+        .unwrap_or_else(|| "artifacts".to_owned());
+    reporter.info(format!(
+        "Artifacts: {}  |  Continue on failure: {}",
+        artifacts_dir,
+        if config.continue_on_failure {
+            "yes"
+        } else {
+            "no (fail fast)"
+        }
+    ));
+
+    reporter.info(format!(
+        "Base URL: {}",
+        config.base_url.as_deref().unwrap_or("-")
+    ));
+    reporter.info(format!("Endpoints: {} configured", config.endpoints.len()));
+    if config.endpoints.is_empty() {
+        reporter.info(format!(
+            "  (using default LLM: {} @ {})",
+            config.llm_model.as_deref().unwrap_or("-"),
+            config.llm_url.as_deref().unwrap_or("-"),
+        ));
+    } else {
+        for (name, ep) in &config.endpoints {
+            reporter.info(format!(
+                "  {name}: {type:?} @ {url}{fallbacks}",
+                type = ep.endpoint_type,
+                url = ep.url.as_deref().unwrap_or("(subprocess)"),
+                fallbacks = if ep.fallbacks.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ->  fallbacks: {}", ep.fallbacks.join(", "))
+                },
+            ));
+        }
+    }
+    reporter.info(format!(
+        "Browser: {} ({}x{})",
+        if config.browser_headless.unwrap_or(true) {
+            "headless"
+        } else {
+            "visible"
+        },
+        config.viewport_width.unwrap(),
+        config.viewport_height.unwrap(),
+    ));
+    reporter.info(format!(
+        "Start URL: {}",
+        config.start_url.as_deref().unwrap_or("/dashboard"),
+    ));
+    reporter.info(format!(
+        "Tests: {tests_len}  Definitions: {definitions_len}",
+    ));
+    if let Some(ref global_budget) = config.budgets.global {
+        if let Some(cost) = global_budget.max_cost {
+            reporter.info(format!("Budget (global): max ${cost:.2}"));
+        }
+        if let Some(tokens) = global_budget.max_tokens {
+            reporter.info(format!("Budget (global): max {tokens} tokens"));
+        }
+    }
+    if let Some(ref per_test) = config.budgets.per_test_default {
+        if let Some(cost) = per_test.max_cost {
+            reporter.info(format!("Budget (per-test default): max ${cost:.2}"));
+        }
+        if let Some(tokens) = per_test.max_tokens {
+            reporter.info(format!("Budget (per-test default): max {tokens} tokens"));
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
@@ -203,6 +487,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Run {
             scenario,
+            parallel,
+            parallel_min,
+            parallel_max,
             base_url,
             llm_url,
             llm_model,
@@ -250,255 +537,120 @@ async fn main() -> anyhow::Result<()> {
                 reporter.add_redaction_secret(s);
             }
 
-            let toml_content = std::fs::read_to_string(&scenario)
-                .with_context(|| format!("reading {}", scenario.display()))?;
-            let mut scenario_def: llm_browser_testkit::scenario::Scenario =
-                toml::from_str(&toml_content).with_context(|| "parsing scenario TOML")?;
-
-            // Build effective global config: CLI args override scenario [config]
-            let mut config = scenario_def.config.clone();
-
-            config.base_url = base_url.or(config.base_url);
-            config.llm_url = llm_url.or(config.llm_url);
-            config.llm_model = llm_model.or(config.llm_model);
-            config.llm_api_key = llm_api_key.or(config.llm_api_key);
-            // Fallback endpoint: only meaningful when the scenario declares
-            // no [config.endpoints] table (with a table, per-endpoint
-            // `fallbacks = [...]` is the declarative form). Synthesize a
-            // two-endpoint table here so CLI/env fallback settings behave
-            // exactly like the declarative chain.
-            if let Some(fb_url) = nonempty(llm_fallback_url) {
-                if config.endpoints.is_empty() {
-                    let mut endpoints = std::collections::HashMap::new();
-                    endpoints.insert(
-                        "default".to_owned(),
-                        llm_browser_testkit::scenario::EndpointConfig {
-                            endpoint_type: llm_browser_testkit::scenario::EndpointType::Llm,
-                            url: config.llm_url.clone(),
-                            model: config.llm_model.clone(),
-                            api_key: config.llm_api_key.clone(),
-                            headers: config.llm_headers.clone(),
-                            default_for: vec!["targeting".to_owned(), "assertion".to_owned()],
-                            fallbacks: vec!["fallback".to_owned()],
-                            ..Default::default()
-                        },
-                    );
-                    endpoints.insert(
-                        "fallback".to_owned(),
-                        llm_browser_testkit::scenario::EndpointConfig {
-                            endpoint_type: llm_browser_testkit::scenario::EndpointType::Llm,
-                            url: Some(fb_url),
-                            model: nonempty(llm_fallback_model),
-                            api_key: nonempty(llm_fallback_api_key),
-                            default_for: Vec::new(),
-                            ..Default::default()
-                        },
-                    );
-                    config.endpoints = endpoints;
-                }
-            }
-            if !llm_headers.is_empty() {
-                let mut headers = config.llm_headers;
-                for (k, v) in llm_headers {
-                    headers.insert(k, v);
-                }
-                config.llm_headers = headers;
-            }
-            if !model_params.is_empty() {
-                let mut params = config.model_params;
-                for (k, v) in model_params {
-                    params.insert(k, v);
-                }
-                config.model_params = params;
-            }
-            config.browser_headless = Some(headless);
-            config.timeout_secs = Some(timeout.max(config.timeout_secs.unwrap_or(60)));
-            config.viewport_width = Some(viewport_width.max(config.viewport_width.unwrap_or(1280)));
-            config.viewport_height =
-                Some(viewport_height.max(config.viewport_height.unwrap_or(720)));
-            if config.start_url.is_none() {
-                config.start_url = Some(start_url);
-            }
-
-            // CLI budget overrides
-            let enforce = budget_enforcement
-                .as_deref()
-                .map(|e| match e.to_lowercase().as_str() {
-                    "soft" => llm_browser_testkit::scenario::BudgetEnforcement::Soft,
-                    _ => llm_browser_testkit::scenario::BudgetEnforcement::Hard,
-                });
-            if max_cost.is_some() || max_tokens.is_some() || enforce.is_some() {
-                let global =
-                    config
-                        .budgets
-                        .global
-                        .get_or_insert(llm_browser_testkit::scenario::BudgetDef {
-                            max_cost: None,
-                            max_tokens: None,
-                            max_calls: None,
-                            enforcement: None,
-                        });
-                if let Some(mc) = max_cost {
-                    global.max_cost = Some(mc);
-                }
-                if let Some(mt) = max_tokens {
-                    global.max_tokens = Some(mt);
-                }
-                if let Some(e) = enforce {
-                    global.enforcement = Some(e);
-                }
-            }
-
-            // CLI A2A server override
-            if let Some(port) = agent_port {
-                config.a2a_server = Some(llm_browser_testkit::scenario::A2aServerConfig {
-                    enabled: true,
-                    port,
-                });
-            }
-
-            // CLI failure-behavior overrides (only when the flag was passed,
-            // so per-scenario [config] values keep their precedence).
-            if let Some(dir) = artifacts_dir {
-                config.artifacts_dir = Some(dir);
-            }
-            if continue_on_failure {
-                config.continue_on_failure = true;
-            }
-            let artifacts_dir = config
-                .artifacts_dir
-                .clone()
-                .unwrap_or_else(|| "artifacts".to_owned());
-            reporter.info(format!(
-                "Artifacts: {}  |  Continue on failure: {}",
+            let overrides = RunOverrides {
+                base_url,
+                llm_url,
+                llm_model,
+                llm_api_key,
+                llm_fallback_url,
+                llm_fallback_model,
+                llm_fallback_api_key,
+                llm_headers,
+                model_params,
+                headless,
+                timeout,
+                viewport_width,
+                viewport_height,
+                start_url,
+                max_cost,
+                max_tokens,
+                budget_enforcement,
+                agent_port,
                 artifacts_dir,
-                if config.continue_on_failure {
-                    "yes"
-                } else {
-                    "no (fail fast)"
-                }
-            ));
-
-            reporter.info(format!(
-                "Base URL: {}",
-                config.base_url.as_deref().unwrap_or("-")
-            ));
-            reporter.info(format!("Endpoints: {} configured", config.endpoints.len()));
-            if config.endpoints.is_empty() {
-                reporter.info(format!(
-                    "  (using default LLM: {} @ {})",
-                    config.llm_model.as_deref().unwrap_or("-"),
-                    config.llm_url.as_deref().unwrap_or("-"),
-                ));
-            } else {
-                for (name, ep) in &config.endpoints {
-                    reporter.info(format!(
-                        "  {name}: {type:?} @ {url}{fallbacks}",
-                        type = ep.endpoint_type,
-                        url = ep.url.as_deref().unwrap_or("(subprocess)"),
-                        fallbacks = if ep.fallbacks.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  ->  fallbacks: {}", ep.fallbacks.join(", "))
-                        },
-                    ));
-                }
-            }
-            reporter.info(format!(
-                "Browser: {} ({}x{})",
-                if config.browser_headless.unwrap_or(true) {
-                    "headless"
-                } else {
-                    "visible"
-                },
-                config.viewport_width.unwrap(),
-                config.viewport_height.unwrap(),
-            ));
-            reporter.info(format!(
-                "Start URL: {}",
-                config.start_url.as_deref().unwrap_or("/dashboard"),
-            ));
-            reporter.info(format!(
-                "Tests: {}  Definitions: {}",
-                scenario_def.test.len(),
-                scenario_def.definitions.len(),
-            ));
-            if let Some(ref global_budget) = config.budgets.global {
-                if let Some(cost) = global_budget.max_cost {
-                    reporter.info(format!("Budget (global): max ${cost:.2}"));
-                }
-                if let Some(tokens) = global_budget.max_tokens {
-                    reporter.info(format!("Budget (global): max {tokens} tokens"));
-                }
-            }
-            if let Some(ref per_test) = config.budgets.per_test_default {
-                if let Some(cost) = per_test.max_cost {
-                    reporter.info(format!("Budget (per-test default): max ${cost:.2}"));
-                }
-                if let Some(tokens) = per_test.max_tokens {
-                    reporter.info(format!("Budget (per-test default): max {tokens} tokens"));
-                }
-            }
-
-            let definitions = std::mem::take(&mut scenario_def.definitions);
-
-            // Viewport matrix expansion: when [config.viewport_matrix] is
-            // set, duplicate every test once per named viewport. Each
-            // variant overrides the test's viewport and gets a " — <name>"
-            // suffix so the report shows exactly which size ran.
-            let mut expanded_tests = std::mem::take(&mut scenario_def.test);
-            if let Some(matrix) = &config.viewport_matrix {
-                if !matrix.viewports.is_empty() {
-                    let mut expanded: Vec<llm_browser_testkit::scenario::TestGroup> = Vec::new();
-                    for test in expanded_tests {
-                        for vp in &matrix.viewports {
-                            let mut variant = test.clone();
-                            variant.name = format!("{} — {}", test.name, vp.name);
-                            variant.viewport_width = Some(vp.width);
-                            variant.viewport_height = Some(vp.height);
-                            expanded.push(variant);
-                        }
-                    }
-                    expanded_tests = expanded;
-                    reporter.info(format!(
-                        "Viewport matrix: {} variants per test ({})",
-                        matrix.viewports.len(),
-                        matrix
-                            .viewports
-                            .iter()
-                            .map(|v| format!("{}={}x{}", v.name, v.width, v.height))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    ));
-                }
-            }
-
-            let runner = llm_browser_testkit::runner::ScenarioRunner::with_reporter(
-                config,
-                definitions,
-                Arc::clone(&reporter),
-            );
-
-            let report = match runner.run(&expanded_tests) {
-                Ok(report) => report,
-                Err(err) => {
-                    // Route through the reporter so the error text is
-                    // redacted; anyhow's own `?` rendering would bypass it.
-                    reporter.error(format!("{err:#}"));
-                    std::process::exit(1);
-                }
+                continue_on_failure,
             };
 
-            reporter.finish()?;
+            // Parse every scenario file, apply CLI overrides + the viewport
+            // matrix, and build one runnable ScenarioFile per path. Each file
+            // keeps its own config/definitions/tests.
+            let mut files: Vec<ScenarioFile> = Vec::new();
+            for path in scenario {
+                let toml_content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let mut scenario_def: Scenario =
+                    toml::from_str(&toml_content).with_context(|| "parsing scenario TOML")?;
+                let config = apply_cli_overrides(scenario_def.config.clone(), &overrides);
+                let test_count = scenario_def.test.len();
+                let definitions = std::mem::take(&mut scenario_def.definitions);
+                let tests = expand_viewport_matrix(
+                    &config,
+                    std::mem::take(&mut scenario_def.test),
+                    &reporter,
+                );
+                print_scenario_header(&reporter, &config, test_count, definitions.len());
+                files.push(ScenarioFile {
+                    label: path.to_string_lossy().to_string(),
+                    config,
+                    definitions,
+                    tests,
+                });
+            }
 
-            // Print cost report
-            llm_browser_testkit::reporting::print_report(
-                &runner.usage_tracker().per_test_snapshots(),
-                &runner.usage_tracker().global_snapshot(),
-            );
+            // Single file: keep the original serial path so existing
+            // invocations behave and report exactly as before.
+            if files.len() == 1 {
+                let file = &files[0];
+                let runner = llm_browser_testkit::runner::ScenarioRunner::with_reporter(
+                    file.config.clone(),
+                    file.definitions.clone(),
+                    Arc::clone(&reporter),
+                );
 
-            if report.failed > 0 {
-                std::process::exit(1);
+                let report = match runner.run(&file.tests) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        // Route through the reporter so the error text is
+                        // redacted; anyhow's own `?` rendering would bypass it.
+                        reporter.error(format!("{err:#}"));
+                        std::process::exit(1);
+                    }
+                };
+
+                reporter.finish()?;
+
+                // Print cost report
+                llm_browser_testkit::reporting::print_report(
+                    &runner.usage_tracker().per_test_snapshots(),
+                    &runner.usage_tracker().global_snapshot(),
+                );
+
+                if report.failed > 0 {
+                    std::process::exit(1);
+                }
+            } else {
+                // Multiple files: run the batch concurrently, each file on
+                // its own isolated browser. Concurrency auto-scales to the
+                // machine's memory (learning the real per-browser footprint)
+                // unless `--parallel` pins it; out-of-memory launch failures
+                // are guarded and retried.
+                let mode = llm_browser_testkit::parallel::mode_from_cli(
+                    parallel,
+                    parallel_min,
+                    parallel_max,
+                );
+                let memory = llm_browser_testkit::parallel::probe_memory_async().await;
+                let run = match llm_browser_testkit::parallel::run_scenarios(
+                    files,
+                    RunOptions {
+                        mode,
+                        reporter: Arc::clone(&reporter),
+                        memory,
+                    },
+                ) {
+                    Ok(run) => run,
+                    Err(err) => {
+                        reporter.error(format!("{err:#}"));
+                        std::process::exit(1);
+                    }
+                };
+
+                reporter.finish()?;
+
+                llm_browser_testkit::reporting::print_report(&run.per_test, &run.global);
+
+                if run.report.failed > 0 {
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -646,5 +798,41 @@ mod tests {
             .map(Clone::clone)
             .collect();
         assert_eq!(vals, vec!["tok-abc", "one", "two", "three"]);
+    }
+
+    #[test]
+    fn test_cli_run_accepts_multiple_scenarios_and_parallel() {
+        let cmd = super::Cli::command();
+        let matches = cmd
+            .try_get_matches_from([
+                "llm-browser-testkit",
+                "run",
+                "a.toml",
+                "b.toml",
+                "c.toml",
+                "--parallel",
+                "3",
+            ])
+            .unwrap();
+        let sub = matches.subcommand_matches("run").unwrap();
+        let scenarios: Vec<String> = sub
+            .get_many::<std::path::PathBuf>("scenario")
+            .unwrap()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(scenarios, vec!["a.toml", "b.toml", "c.toml"]);
+        assert_eq!(sub.get_one::<u32>("parallel").copied(), Some(3));
+    }
+
+    #[test]
+    fn test_cli_run_parallel_omitted_means_auto_with_default_bounds() {
+        let cmd = super::Cli::command();
+        let matches = cmd
+            .try_get_matches_from(["llm-browser-testkit", "run", "t.toml"])
+            .unwrap();
+        let sub = matches.subcommand_matches("run").unwrap();
+        assert_eq!(sub.get_one::<u32>("parallel").copied(), None);
+        assert_eq!(sub.get_one::<u32>("parallel_min").copied(), Some(1));
+        assert_eq!(sub.get_one::<u32>("parallel_max").copied(), Some(0));
     }
 }

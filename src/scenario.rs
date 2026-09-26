@@ -175,6 +175,18 @@ pub struct ScenarioConfig {
     /// which are intentionally 1x1 / off-screen.
     #[serde(default = "default_layout_ignore_classes")]
     pub layout_ignore_classes: Vec<String>,
+    /// Concurrency group for parallel runs across scenario files.
+    ///
+    /// When several scenario files are run together (`--parallel > 1`),
+    /// files that declare the **same** `concurrency_group` are never
+    /// executed at the same time — use this for files that touch the same
+    /// shared backend state and would interfere if run concurrently. A file
+    /// with no group gets its own implicit group, so distinct files run in
+    /// parallel by default. Only honored when files are passed to the
+    /// runner as a batch; has no effect on the steps within a single file,
+    /// which always run sequentially.
+    #[serde(default)]
+    pub concurrency_group: Option<String>,
 }
 
 /// A list of named viewports a scenario is expanded across.
