@@ -277,11 +277,13 @@ pub struct EndpointConfig {
     /// Pricing configuration.
     #[serde(default)]
     pub pricing: Option<PricingConfig>,
-    /// Automatically fetch exact per-token pricing for this endpoint from a
-    /// provider's public pricing API, filling in any pricing fields left
-    /// unset. `"openrouter"` always uses the `OpenRouter` models API;
-    /// `"auto"` does so only when the endpoint URL host is `openrouter.ai`.
-    /// Explicit `pricing` values win over fetched ones.
+    /// Automatically fetch exact per-token pricing for this endpoint at
+    /// startup from a provider's public pricing API, filling in any pricing
+    /// fields left unset (explicit `pricing` values win). Defaults to
+    /// `"auto"`: Bedrock endpoints use the AWS Price List and `openrouter.ai`
+    /// URLs use the `OpenRouter` models API; other providers are a no-op.
+    /// Force a source with `"bedrock"` / `"openrouter"`, or disable the
+    /// lookup with `"off"` / `"none"` / `"disabled"`.
     #[serde(default)]
     pub pricing_source: Option<String>,
     /// Task types this endpoint serves by default

@@ -574,11 +574,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut scenario_def: Scenario =
                     toml::from_str(&toml_content).with_context(|| "parsing scenario TOML")?;
                 let mut config = apply_cli_overrides(scenario_def.config.clone(), &overrides);
-                if config
-                    .endpoints
-                    .values()
-                    .any(|ec| ec.pricing_source.is_some())
-                {
+                if !config.endpoints.is_empty() {
                     if let Some(client) = &pricing_client {
                         match llm_browser_testkit::pricing::apply_auto_pricing(
                             &mut config.endpoints,

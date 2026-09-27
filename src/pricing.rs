@@ -79,6 +79,18 @@ pub async fn fetch_openrouter_pricing(
     client: &reqwest::Client,
     model: &str,
 ) -> Result<ModelPricing, String> {
+    let json = fetch_openrouter_models(client).await?;
+    parse_openrouter_models(&json, model)
+        .ok_or_else(|| format!("model `{model}` not found in OpenRouter pricing"))
+}
+
+/// Fetches the raw `OpenRouter` models catalog (one HTTP call, reusable for
+/// many models).
+///
+/// # Errors
+///
+/// Returns a description when the request fails or the response is not JSON.
+async fn fetch_openrouter_models(client: &reqwest::Client) -> Result<serde_json::Value, String> {
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
         .send()
@@ -90,12 +102,9 @@ pub async fn fetch_openrouter_pricing(
             resp.status()
         ));
     }
-    let json: serde_json::Value = resp
-        .json()
+    resp.json()
         .await
-        .map_err(|e| format!("OpenRouter models response was not JSON: {e}"))?;
-    parse_openrouter_models(&json, model)
-        .ok_or_else(|| format!("model `{model}` not found in OpenRouter pricing"))
+        .map_err(|e| format!("OpenRouter models response was not JSON: {e}"))
 }
 
 /// Which exact-pricing source an endpoint opts into.
@@ -109,28 +118,36 @@ enum Source {
 
 /// Resolves the pricing source for an endpoint.
 ///
-/// `pricing_source` is `"openrouter"`, `"bedrock"` or `"auto"`. `"auto"` uses
-/// Bedrock for Bedrock endpoints and `OpenRouter` when the URL host is
-/// `openrouter.ai`.
+/// `pricing_source` is `"openrouter"`, `"bedrock"`, `"auto"`, or one of
+/// `"off"`/`"none"`/`"disabled"`. When **unset** (the default) or `"auto"`,
+/// the source is inferred: Bedrock endpoints use the Bedrock Price List and
+/// `openrouter.ai` URLs use the `OpenRouter` models API; anything else is a
+/// no-op.
 #[must_use]
 fn source_for(ec: &EndpointConfig) -> Option<Source> {
-    match ec.pricing_source.as_deref() {
+    let source = ec.pricing_source.as_deref().map(str::to_ascii_lowercase);
+    match source.as_deref() {
         Some("openrouter") => Some(Source::OpenRouter),
         Some("bedrock") => Some(Source::Bedrock),
-        Some("auto") => {
-            if ec.provider == Provider::Bedrock {
-                Some(Source::Bedrock)
-            } else if ec
-                .url
-                .as_deref()
-                .is_some_and(|url| url.to_ascii_lowercase().contains("openrouter.ai"))
-            {
-                Some(Source::OpenRouter)
-            } else {
-                None
-            }
-        }
-        _ => None,
+        Some("off" | "none" | "disabled") => None,
+        _ => auto_source(ec),
+    }
+}
+
+/// Infers the pricing source from the endpoint when `pricing_source` is unset
+/// or `"auto"`.
+#[must_use]
+fn auto_source(ec: &EndpointConfig) -> Option<Source> {
+    if ec.provider == Provider::Bedrock {
+        Some(Source::Bedrock)
+    } else if ec
+        .url
+        .as_deref()
+        .is_some_and(|url| url.to_ascii_lowercase().contains("openrouter.ai"))
+    {
+        Some(Source::OpenRouter)
+    } else {
+        None
     }
 }
 
@@ -170,14 +187,28 @@ pub async fn apply_auto_pricing(
 ) -> Result<usize, String> {
     let mut priced = 0;
     let mut first_error: Option<String> = None;
-    // Fetched once per region, reused across Bedrock endpoints.
+    // Fetched once per region/endpoint-kind and reused.
     let mut bedrock_catalogs: HashMap<String, HashMap<String, ModelPricing>> = HashMap::new();
+    let mut openrouter_catalog: Option<serde_json::Value> = None;
     for ec in endpoints.values_mut() {
         let Some(model) = ec.model.clone() else {
             continue;
         };
         let result = match source_for(ec) {
-            Some(Source::OpenRouter) => fetch_openrouter_pricing(client, &model).await,
+            Some(Source::OpenRouter) => {
+                if openrouter_catalog.is_none() {
+                    match fetch_openrouter_models(client).await {
+                        Ok(catalog) => openrouter_catalog = Some(catalog),
+                        Err(e) => {
+                            first_error.get_or_insert(e);
+                            continue;
+                        }
+                    }
+                }
+                let catalog = openrouter_catalog.as_ref().expect("catalog fetched above");
+                parse_openrouter_models(catalog, &model)
+                    .ok_or_else(|| format!("model `{model}` not found in OpenRouter pricing"))
+            }
             Some(Source::Bedrock) => {
                 let region = bedrock_region(ec);
                 if !bedrock_catalogs.contains_key(&region) {
@@ -744,6 +775,35 @@ mod tests {
         );
         let nova = lookup_bedrock(&catalog, "amazon.nova-lite-v1:0").expect("nova lite");
         assert!(nova.input_per_1m > 0.0, "{nova:?}");
+    }
+
+    #[test]
+    fn pricing_source_defaults_to_auto() {
+        use super::{source_for, Source};
+        use crate::scenario::Provider;
+        // Unset -> inferred from the endpoint.
+        let bedrock = EndpointConfig {
+            provider: Provider::Bedrock,
+            ..EndpointConfig::default()
+        };
+        assert_eq!(source_for(&bedrock), Some(Source::Bedrock));
+        let openrouter = EndpointConfig {
+            url: Some("https://openrouter.ai/api/v1".to_owned()),
+            ..EndpointConfig::default()
+        };
+        assert_eq!(source_for(&openrouter), Some(Source::OpenRouter));
+        let plain = EndpointConfig {
+            url: Some("https://api.openai.com/v1".to_owned()),
+            ..EndpointConfig::default()
+        };
+        assert_eq!(source_for(&plain), None);
+        // Explicit off wins even for a Bedrock endpoint.
+        let off = EndpointConfig {
+            provider: Provider::Bedrock,
+            pricing_source: Some("off".to_owned()),
+            ..EndpointConfig::default()
+        };
+        assert_eq!(source_for(&off), None);
     }
 
     fn catalog() -> serde_json::Value {

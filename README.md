@@ -1022,22 +1022,28 @@ cache_pricing = false               # bill every prompt token at the input price
 
 ### Automatic pricing lookup
 
-Pricing is **not** fetched automatically by default — it comes from the
-`pricing` block above. Where a provider exposes **exact**, machine-readable
-prices, you can opt in with `pricing_source`; the lookup runs once at startup
-and fills only the pricing fields you left unset (explicit values win). A
-lookup failure is non-fatal: the run continues with the configured pricing.
+Pricing lookup is **on by default** (`pricing_source = "auto"`). Where a
+provider exposes **exact**, machine-readable prices, the lookup runs once at
+startup and fills only the pricing fields you left unset (explicit values
+win). A lookup failure is non-fatal: the run continues with the configured
+pricing. `auto` uses the Bedrock Price List for Bedrock endpoints and the
+OpenRouter models API for `openrouter.ai` URLs; all other providers are a
+no-op.
 
 ```toml
-[config.endpoints.openrouter]
-model = "anthropic/claude-3.5-sonnet"
-pricing_source = "openrouter"   # or "auto" (openrouter.ai URLs)
-
+# auto is the default — no pricing_source needed:
 [config.endpoints.bedrock]
 provider = "bedrock"
 model = "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
-pricing_source = "bedrock"      # or "auto" (any Bedrock endpoint)
 # region comes from [..aws].region, else AWS_REGION, else us-east-1
+
+[config.endpoints.openrouter]
+model = "anthropic/claude-3.5-sonnet"
+# URL host openrouter.ai -> OpenRouter pricing
+
+# Force a source, or turn the lookup off:
+[config.endpoints.other]
+pricing_source = "bedrock"      # "openrouter" | "off" | "none" | "disabled"
 ```
 
 `openrouter` fetches exact per-token `prompt`, `completion`, `input_cache_read`
