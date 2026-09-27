@@ -65,8 +65,8 @@ llm-browser-testkit run hello.toml
 Example output:
 
 ```
-Test: Homepage loads — passed (6.2s, $0.0005, 138 tokens, 1 calls, 2+0+0 steps)
-run passed: tests 1 passed, 0 failed | steps 2 passed, 0 failed, 0 skipped | $0.0005 | 138 tokens | 1 calls
+Test: Homepage loads — passed (6.2s, $0.0005, 138 tokens (100 in / 38 out, 0 cached), 1 calls, 2+0+0 steps) | models: deepseek
+run passed: tests 1 passed, 0 failed | steps 2 passed, 0 failed, 0 skipped | $0.0005 | 138 tokens (100 in / 38 out, 0 cached) | 1 calls | models: deepseek
 ```
 
 ## Write your first test
@@ -906,18 +906,27 @@ llm-browser-testkit run scenario.toml --max-cost 10.0 --max-tokens 1000000 --bud
 -------------------------------
   COST REPORT
 -------------------------------
-  Test: "Homepage loads" — $0.0123 | 1,234 tokens | 4 calls
-    endpoint.default:   4 calls,   1,234 tokens, $0.0123
-  Test: "Dashboard smoke" — $0.0891 | 4,567 tokens | 6 calls
-    endpoint.vision:    2 calls,   3,000 tokens, $0.0450
-    endpoint.default:   3 calls,   1,567 tokens, $0.0441
-    endpoint.audit_bot:   1 call,   0 tokens, $0.0000
+  Test: "Homepage loads" — $0.0123 | 1,234 tokens (800 in / 434 out, 120 cached) | 4 calls
+    models: deepseek
+    endpoint.default:     4 calls,     800 in /     434 out (120 cached),   1,234 tokens, $0.0123
+      models: deepseek
+  Test: "Dashboard smoke" — $0.0891 | 4,567 tokens (3,000 in / 1,567 out, 0 cached) | 6 calls
+    models: deepseek, gpt-4o
+    endpoint.vision:      2 calls,   2,000 in /   1,000 out (0 cached),   3,000 tokens, $0.0450
+      models: gpt-4o
+    endpoint.default:     3 calls,   1,000 in /     567 out (0 cached),   1,567 tokens, $0.0441
+      models: deepseek
+    endpoint.audit_bot:   1 call,        0 in /       0 out (0 cached),       0 tokens, $0.0000
 -------------------------------
   GLOBAL SUMMARY
-    Total cost:     $0.1014
-    Total tokens:   5,801
-Total calls:    10
-------------------------------
+    Total cost:         $0.1014
+    Total tokens:       5,801
+    Total input:        3,800
+    Total output:       2,001
+    Total cached input: 120
+    Total calls:        10
+    Models used:        deepseek, gpt-4o
+-------------------------------
 ```
 
 ## Parallel runs

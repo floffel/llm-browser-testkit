@@ -1,6 +1,6 @@
 //! Cost calculation, usage tracking, and pricing logic.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use crate::endpoints::ResolvedEndpoint;
@@ -14,8 +14,12 @@ pub struct EndpointUsage {
     pub input_tokens: u64,
     /// Total output tokens consumed.
     pub output_tokens: u64,
+    /// Input tokens served from the provider's prompt cache.
+    pub cached_input_tokens: u64,
     /// Accumulated cost in USD.
     pub cost: f64,
+    /// Model names observed on this endpoint, sorted and deduplicated.
+    pub models: BTreeSet<String>,
 }
 
 impl EndpointUsage {
@@ -35,6 +39,14 @@ pub struct UsageSnapshot {
     pub total_calls: u64,
     /// Total tokens across all endpoints.
     pub total_tokens: u64,
+    /// Total input (prompt) tokens across all endpoints.
+    pub total_input_tokens: u64,
+    /// Total output (completion) tokens across all endpoints.
+    pub total_output_tokens: u64,
+    /// Total input tokens served from provider prompt caches.
+    pub total_cached_input_tokens: u64,
+    /// Model names observed across all endpoints, sorted and deduplicated.
+    pub models: Vec<String>,
 }
 
 impl UsageSnapshot {
@@ -44,11 +56,24 @@ impl UsageSnapshot {
         let total_cost = endpoints.values().map(|u| u.cost).sum();
         let total_calls = endpoints.values().map(|u| u.calls).sum();
         let total_tokens = endpoints.values().map(EndpointUsage::tokens).sum();
+        let total_input_tokens = endpoints.values().map(|u| u.input_tokens).sum();
+        let total_output_tokens = endpoints.values().map(|u| u.output_tokens).sum();
+        let total_cached_input_tokens = endpoints.values().map(|u| u.cached_input_tokens).sum();
+        let models: Vec<String> = endpoints
+            .values()
+            .flat_map(|u| u.models.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         Self {
             endpoints: endpoints.clone(),
             total_cost,
             total_calls,
             total_tokens,
+            total_input_tokens,
+            total_output_tokens,
+            total_cached_input_tokens,
+            models,
         }
     }
 }
@@ -80,7 +105,8 @@ impl UsageTracker {
         }
     }
 
-    /// Records a completed call, adding usage and cost.
+    /// Records a completed LLM call, adding usage, cost, and the answering
+    /// model to the endpoint's accumulator.
     ///
     /// # Panics
     ///
@@ -90,19 +116,23 @@ impl UsageTracker {
         &self,
         endpoint_name: &str,
         endpoint: &ResolvedEndpoint,
-        input_tokens: u64,
-        output_tokens: u64,
+        model: &str,
+        usage: &LlmUsage,
     ) {
-        let cost = calculate_llm_cost(endpoint, input_tokens, output_tokens);
+        let cost = calculate_llm_cost(endpoint, usage.prompt_tokens, usage.completion_tokens);
         let mut inner = self.inner.lock().unwrap();
         let eu = inner
             .per_endpoint
             .entry(endpoint_name.to_owned())
             .or_default();
         eu.calls += 1;
-        eu.input_tokens += input_tokens;
-        eu.output_tokens += output_tokens;
+        eu.input_tokens += usage.prompt_tokens;
+        eu.output_tokens += usage.completion_tokens;
+        eu.cached_input_tokens += usage.cached_input_tokens;
         eu.cost += cost;
+        if !model.is_empty() {
+            eu.models.insert(model.to_owned());
+        }
     }
 
     /// Records a flat-cost call (MCP tool, agent task).
@@ -180,11 +210,24 @@ impl UsageTracker {
             ge.calls += ep_usage.calls;
             ge.input_tokens += ep_usage.input_tokens;
             ge.output_tokens += ep_usage.output_tokens;
+            ge.cached_input_tokens += ep_usage.cached_input_tokens;
             ge.cost += ep_usage.cost;
+            ge.models.extend(ep_usage.models.iter().cloned());
         }
         inner.global.total_cost += snapshot.total_cost;
         inner.global.total_calls += snapshot.total_calls;
         inner.global.total_tokens += snapshot.total_tokens;
+        inner.global.total_input_tokens += snapshot.total_input_tokens;
+        inner.global.total_output_tokens += snapshot.total_output_tokens;
+        inner.global.total_cached_input_tokens += snapshot.total_cached_input_tokens;
+        inner.global.models = inner
+            .global
+            .endpoints
+            .values()
+            .flat_map(|u| u.models.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         inner.per_test.push((test_name.to_owned(), snapshot));
     }
 }
@@ -217,6 +260,8 @@ pub struct LlmUsage {
     pub completion_tokens: u64,
     /// Total tokens used.
     pub total_tokens: u64,
+    /// Input tokens served from the provider's prompt cache (cache hit).
+    pub cached_input_tokens: u64,
 }
 
 /// Result of an LLM chat call including usage data.
@@ -229,6 +274,12 @@ pub struct LlmResponse {
 }
 
 /// Extracts token usage from an OpenAI-compatible API response JSON.
+///
+/// Cached prompt tokens are read from the `OpenAI`/`OpenRouter`
+/// `usage.prompt_tokens_details.cached_tokens` field, falling back to the
+/// `Anthropic`-compatible `usage.cache_read_input_tokens` and `DeepSeek`
+/// `usage.prompt_cache_hit_tokens` spellings. Providers that do not report
+/// prompt caching yield `0`.
 #[must_use]
 pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
     let usage = &value["usage"];
@@ -236,12 +287,17 @@ pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
         prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
         completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
         total_tokens: usage["total_tokens"].as_u64().unwrap_or(0),
+        cached_input_tokens: usage["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .or_else(|| usage["cache_read_input_tokens"].as_u64())
+            .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
+            .unwrap_or(0),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::costs::{calculate_llm_cost, UsageTracker};
+    use crate::costs::{calculate_llm_cost, LlmUsage, UsageTracker};
     use crate::endpoints::ResolvedEndpoint;
     use crate::scenario::EndpointType;
 
@@ -275,6 +331,15 @@ mod tests {
         }
     }
 
+    fn usage(prompt: u64, completion: u64, cached: u64) -> LlmUsage {
+        LlmUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            cached_input_tokens: cached,
+        }
+    }
+
     #[test]
     fn test_calculate_llm_cost() {
         let ep = make_endpoint("test", 0.15, 0.60, 0.0);
@@ -294,11 +359,15 @@ mod tests {
     fn test_usage_tracker_record_llm() {
         let tracker = UsageTracker::new();
         let ep = make_endpoint("gpt4", 2.50, 10.0, 0.0);
-        tracker.record_llm_call("gpt4", &ep, 1000, 500);
+        tracker.record_llm_call("gpt4", &ep, "gpt-4o", &usage(1000, 500, 200));
 
         let snap = tracker.current_test_snapshot();
         assert_eq!(snap.total_calls, 1);
         assert_eq!(snap.total_tokens, 1500);
+        assert_eq!(snap.total_input_tokens, 1000);
+        assert_eq!(snap.total_output_tokens, 500);
+        assert_eq!(snap.total_cached_input_tokens, 200);
+        assert_eq!(snap.models, vec!["gpt-4o".to_owned()]);
         assert!(
             snap.total_cost > 0.0,
             "expected cost > 0, got {}",
@@ -309,6 +378,8 @@ mod tests {
         assert_eq!(ep_usage.calls, 1);
         assert_eq!(ep_usage.input_tokens, 1000);
         assert_eq!(ep_usage.output_tokens, 500);
+        assert_eq!(ep_usage.cached_input_tokens, 200);
+        assert!(ep_usage.models.contains("gpt-4o"));
     }
 
     #[test]
@@ -329,12 +400,16 @@ mod tests {
         let fast = make_endpoint("fast", 0.15, 0.60, 0.0);
         let slow = make_endpoint("slow", 2.50, 10.0, 0.0);
 
-        tracker.record_llm_call("fast", &fast, 100, 50);
-        tracker.record_llm_call("slow", &slow, 200, 100);
+        tracker.record_llm_call("fast", &fast, "fast-model", &usage(100, 50, 0));
+        tracker.record_llm_call("slow", &slow, "slow-model", &usage(200, 100, 0));
 
         let snap = tracker.current_test_snapshot();
         assert_eq!(snap.total_calls, 2);
         assert_eq!(snap.endpoints.len(), 2);
+        assert_eq!(
+            snap.models,
+            vec!["fast-model".to_owned(), "slow-model".to_owned()]
+        );
     }
 
     #[test]
@@ -342,16 +417,17 @@ mod tests {
         let tracker = UsageTracker::new();
         let ep = make_endpoint("test", 0.15, 0.60, 0.0);
 
-        tracker.record_llm_call("test", &ep, 100, 50);
+        tracker.record_llm_call("test", &ep, "m1", &usage(100, 50, 0));
         tracker.commit_test("test1");
         tracker.reset_per_test();
 
-        tracker.record_llm_call("test", &ep, 200, 100);
+        tracker.record_llm_call("test", &ep, "m2", &usage(200, 100, 0));
         tracker.commit_test("test2");
 
         let global = tracker.global_snapshot();
         assert_eq!(global.total_calls, 2);
         assert_eq!(global.total_tokens, 450);
+        assert_eq!(global.models, vec!["m1".to_owned(), "m2".to_owned()]);
 
         let per_test = tracker.per_test_snapshots();
         assert_eq!(per_test.len(), 2);

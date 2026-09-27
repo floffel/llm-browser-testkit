@@ -234,6 +234,7 @@ impl Redactor {
                 duration_ms,
                 input_tokens,
                 output_tokens,
+                cached_input_tokens,
                 cost,
                 error,
             } => TestEvent::LlmCallFinished {
@@ -246,6 +247,7 @@ impl Redactor {
                 duration_ms: *duration_ms,
                 input_tokens: *input_tokens,
                 output_tokens: *output_tokens,
+                cached_input_tokens: *cached_input_tokens,
                 cost: *cost,
                 error: error.as_deref().map(|s| self.redact(s)),
             },
@@ -257,6 +259,10 @@ impl Redactor {
                 duration_ms,
                 cost,
                 tokens,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                models,
                 calls,
             } => TestEvent::TestFinished {
                 test: self.redact(test),
@@ -266,6 +272,10 @@ impl Redactor {
                 duration_ms: *duration_ms,
                 cost: *cost,
                 tokens: *tokens,
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+                cached_input_tokens: *cached_input_tokens,
+                models: models.iter().map(|m| self.redact(m)).collect(),
                 calls: *calls,
             },
             TestEvent::RunFinished {
@@ -276,6 +286,10 @@ impl Redactor {
                 steps_skipped,
                 total_cost,
                 total_tokens,
+                total_input_tokens,
+                total_output_tokens,
+                total_cached_input_tokens,
+                models,
                 total_calls,
             } => TestEvent::RunFinished {
                 tests_passed: *tests_passed,
@@ -285,6 +299,10 @@ impl Redactor {
                 steps_skipped: *steps_skipped,
                 total_cost: *total_cost,
                 total_tokens: *total_tokens,
+                total_input_tokens: *total_input_tokens,
+                total_output_tokens: *total_output_tokens,
+                total_cached_input_tokens: *total_cached_input_tokens,
+                models: models.iter().map(|m| self.redact(m)).collect(),
                 total_calls: *total_calls,
             },
             TestEvent::Warning { message } => TestEvent::Warning {
@@ -553,6 +571,7 @@ mod tests {
             duration_ms: 900,
             input_tokens: 0,
             output_tokens: 0,
+            cached_input_tokens: 0,
             cost: 0.0,
             error: Some("HTTP 401: Bearer sk-static-key invalid (got runtime-token-987654)".into()),
         };
@@ -577,6 +596,10 @@ mod tests {
             duration_ms: 12,
             cost: 0.0042,
             tokens: 42,
+            input_tokens: 30,
+            output_tokens: 12,
+            cached_input_tokens: 5,
+            models: vec!["deepseek".into()],
             calls: 1,
         };
         let redacted = r.redact_event(&event);

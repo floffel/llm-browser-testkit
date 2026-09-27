@@ -529,6 +529,10 @@ impl ScenarioRunner {
                     steps_skipped: 0,
                     total_cost: 0.0,
                     total_tokens: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cached_input_tokens: 0,
+                    models: Vec::new(),
                     total_calls: 0,
                 });
             }
@@ -618,6 +622,10 @@ impl ScenarioRunner {
                 duration_ms,
                 cost: usage.total_cost,
                 tokens: usage.total_tokens,
+                input_tokens: usage.total_input_tokens,
+                output_tokens: usage.total_output_tokens,
+                cached_input_tokens: usage.total_cached_input_tokens,
+                models: usage.models.clone(),
                 calls: usage.total_calls,
             });
 
@@ -643,6 +651,10 @@ impl ScenarioRunner {
                 steps_skipped: report.skipped,
                 total_cost: global.total_cost,
                 total_tokens: global.total_tokens,
+                total_input_tokens: global.total_input_tokens,
+                total_output_tokens: global.total_output_tokens,
+                total_cached_input_tokens: global.total_cached_input_tokens,
+                models: global.models.clone(),
                 total_calls: global.total_calls,
             });
         }
@@ -1478,13 +1490,7 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: format!("LLM assertion call failed: {e}"),
             },
-            |(lr, idx)| {
-                self.usage.record_llm_call(
-                    &chain[idx].name,
-                    chain[idx],
-                    lr.usage.prompt_tokens,
-                    lr.usage.completion_tokens,
-                );
+            |(lr, _idx)| {
                 let content_lower = lr.content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
@@ -1565,13 +1571,7 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: format!("LLM assertion call failed: {e}"),
             },
-            |(lr, idx)| {
-                self.usage.record_llm_call(
-                    &chain[idx].name,
-                    chain[idx],
-                    lr.usage.prompt_tokens,
-                    lr.usage.completion_tokens,
-                );
+            |(lr, _idx)| {
                 let content_lower = lr.content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
@@ -1693,13 +1693,7 @@ impl ScenarioRunner {
                 status: StepStatus::Failed,
                 message: format!("LLM assertion call failed: {e}"),
             },
-            |(lr, idx)| {
-                self.usage.record_llm_call(
-                    &chain[idx].name,
-                    chain[idx],
-                    lr.usage.prompt_tokens,
-                    lr.usage.completion_tokens,
-                );
+            |(lr, _idx)| {
                 let content_lower = lr.content.to_lowercase().trim().to_owned();
                 if content_lower.starts_with("pass") {
                     StepResult {
@@ -1986,7 +1980,7 @@ impl ScenarioRunner {
         parts.join("\n")
     }
 
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
     fn llm_call_chain(
         &self,
         chain: &[&ResolvedEndpoint],
@@ -2067,6 +2061,8 @@ impl ScenarioRunner {
                     .model
                     .clone()
                     .unwrap_or_else(|| primary_model.clone());
+                self.usage
+                    .record_llm_call(&answering, chain[idx], &model, &lr.usage);
                 self.emit_event(&TestEvent::LlmCallFinished {
                     test,
                     index,
@@ -2077,6 +2073,7 @@ impl ScenarioRunner {
                     duration_ms,
                     input_tokens: lr.usage.prompt_tokens,
                     output_tokens: lr.usage.completion_tokens,
+                    cached_input_tokens: lr.usage.cached_input_tokens,
                     cost,
                     error: None,
                 });
@@ -2093,6 +2090,7 @@ impl ScenarioRunner {
                     duration_ms,
                     input_tokens: 0,
                     output_tokens: 0,
+                    cached_input_tokens: 0,
                     cost: 0.0,
                     error: Some(e.clone()),
                 });
@@ -2164,18 +2162,12 @@ impl ScenarioRunner {
         let call_llm = |prompt: &str| self.llm_call_chain(&chain, &sys, prompt, None, "targeting");
 
         let first = call_llm(&user);
-        let (lr, idx) = match first {
+        let (lr, _idx) = match first {
             Ok(lr) => lr,
             Err(e) => {
                 return Err(format!("LLM element targeting failed: {e}"));
             }
         };
-        self.usage.record_llm_call(
-            &chain[idx].name,
-            chain[idx],
-            lr.usage.prompt_tokens,
-            lr.usage.completion_tokens,
-        );
         let clean = sanitize_selector(&lr.content);
         self.reporter.debug(format!("resolved selector: {clean}"));
 
@@ -2198,7 +2190,7 @@ impl ScenarioRunner {
                 "selector {clean} matches nothing — retrying LLM targeting with feedback"
             ));
             let second = call_llm(&retry_user);
-            let (lr2, idx2) = match second {
+            let (lr2, _idx2) = match second {
                 Ok(lr2) => lr2,
                 Err(e) => {
                     return Err(format!(
@@ -2206,12 +2198,6 @@ impl ScenarioRunner {
                     ));
                 }
             };
-            self.usage.record_llm_call(
-                &chain[idx2].name,
-                chain[idx2],
-                lr2.usage.prompt_tokens,
-                lr2.usage.completion_tokens,
-            );
             let clean2 = sanitize_selector(&lr2.content);
             self.reporter
                 .debug(format!("resolved selector (retry): {clean2}"));

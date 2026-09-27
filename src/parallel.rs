@@ -196,6 +196,10 @@ pub fn run_scenarios(files: Vec<ScenarioFile>, opts: RunOptions) -> Result<Paral
             steps_skipped: 0,
             total_cost: 0.0,
             total_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cached_input_tokens: 0,
+            models: Vec::new(),
             total_calls: 0,
         })?;
         return Ok(ParallelRun::default());
@@ -264,6 +268,10 @@ pub fn run_scenarios(files: Vec<ScenarioFile>, opts: RunOptions) -> Result<Paral
         steps_skipped: run.report.skipped,
         total_cost: run.global.total_cost,
         total_tokens: run.global.total_tokens,
+        total_input_tokens: run.global.total_input_tokens,
+        total_output_tokens: run.global.total_output_tokens,
+        total_cached_input_tokens: run.global.total_cached_input_tokens,
+        models: run.global.models.clone(),
         total_calls: run.global.total_calls,
     })?;
 
@@ -677,7 +685,9 @@ fn merge_globals(snapshots: &[UsageSnapshot]) -> UsageSnapshot {
             acc.calls += usage.calls;
             acc.input_tokens += usage.input_tokens;
             acc.output_tokens += usage.output_tokens;
+            acc.cached_input_tokens += usage.cached_input_tokens;
             acc.cost += usage.cost;
+            acc.models.extend(usage.models.iter().cloned());
         }
     }
     UsageSnapshot::from_endpoints(&endpoints)
@@ -1037,7 +1047,9 @@ mod tests {
                 calls: 1,
                 input_tokens: 100,
                 output_tokens: 50,
+                cached_input_tokens: 20,
                 cost: 0.01,
+                models: std::iter::once("m1".to_owned()).collect(),
             },
         );
         snap2.endpoints.insert(
@@ -1046,7 +1058,9 @@ mod tests {
                 calls: 2,
                 input_tokens: 200,
                 output_tokens: 100,
+                cached_input_tokens: 0,
                 cost: 0.02,
+                models: std::iter::once("m1".to_owned()).collect(),
             },
         );
         snap2.endpoints.insert(
@@ -1055,7 +1069,9 @@ mod tests {
                 calls: 1,
                 input_tokens: 10,
                 output_tokens: 5,
+                cached_input_tokens: 0,
                 cost: 0.001,
+                models: std::iter::once("m2".to_owned()).collect(),
             },
         );
         let merged = merge_globals(&[snap1, snap2]);
@@ -1063,9 +1079,11 @@ mod tests {
         let a = merged.endpoints.get("a").unwrap();
         assert_eq!(a.calls, 3);
         assert_eq!(a.input_tokens, 300);
+        assert_eq!(a.cached_input_tokens, 20);
         assert!((a.cost - 0.03).abs() < 0.0001);
         let b = merged.endpoints.get("b").unwrap();
         assert_eq!(b.calls, 1);
+        assert_eq!(merged.models, vec!["m1".to_owned(), "m2".to_owned()]);
     }
 
     #[test]

@@ -397,6 +397,7 @@ fn parse_response(json: &serde_json::Value) -> Result<LlmResponse, String> {
             prompt_tokens: usage["inputTokens"].as_u64().unwrap_or(0),
             completion_tokens: usage["outputTokens"].as_u64().unwrap_or(0),
             total_tokens: usage["totalTokens"].as_u64().unwrap_or(0),
+            cached_input_tokens: usage["cacheReadInputTokens"].as_u64().unwrap_or(0),
         },
     })
 }
