@@ -975,6 +975,43 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_usage_openai_style_cache_write() {
+        // OpenRouter / Azure OpenAI (GPT-5.6+) report cache writes under
+        // prompt_tokens_details.cache_write_tokens alongside cached_tokens.
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1566,
+                "completion_tokens": 1518,
+                "total_tokens": 3084,
+                "prompt_tokens_details": {
+                    "cached_tokens": 1408,
+                    "cache_write_tokens": 100
+                }
+            }
+        });
+        let usage = extract_usage(&json);
+        assert_eq!(usage.cached_input_tokens, 1408);
+        assert_eq!(usage.cache_creation_input_tokens, 100);
+    }
+
+    #[test]
+    fn test_extract_usage_deepseek_cache_hit() {
+        // DeepSeek reports cache hits under prompt_cache_hit_tokens.
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 50,
+                "total_tokens": 550,
+                "prompt_cache_hit_tokens": 400,
+                "prompt_cache_miss_tokens": 100
+            }
+        });
+        let usage = extract_usage(&json);
+        assert_eq!(usage.cached_input_tokens, 400);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
     fn test_extract_usage_empty() {
         let json = serde_json::json!({});
         let usage = extract_usage(&json);

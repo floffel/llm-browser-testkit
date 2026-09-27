@@ -290,18 +290,19 @@ pub struct LlmResponse {
 
 /// Extracts token usage from an OpenAI-compatible API response JSON.
 ///
-/// Cached prompt tokens are read from the `OpenAI`/`OpenRouter`
-/// `usage.prompt_tokens_details.cached_tokens` field, falling back to the
+/// Cache reads are read from `usage.prompt_tokens_details.cached_tokens`
+/// (`OpenAI`, `Azure`, `OpenRouter`, Groq, xAI, …), falling back to the
 /// `Anthropic`-compatible `usage.cache_read_input_tokens` and `DeepSeek`
-/// `usage.prompt_cache_hit_tokens` spellings. Cache-creation (write) tokens
-/// are read from the `Anthropic`-compatible
+/// `usage.prompt_cache_hit_tokens` spellings. Cache writes are read from
+/// `usage.prompt_tokens_details.cache_write_tokens` (`OpenRouter`, and
+/// `OpenAI`/`Azure` on GPT-5.6+), falling back to the `Anthropic`-compatible
 /// `usage.cache_creation_input_tokens`. Providers that do not report prompt
 /// caching yield `0`.
 ///
 /// Note the provider semantics differ: for `OpenAI`-compatible responses
-/// `cached_tokens` is a subset of `prompt_tokens`, whereas for
-/// `Anthropic`/Bedrock-style responses the cache counters are reported in
-/// addition to `inputTokens`.
+/// `cached_tokens`/`cache_write_tokens` are subsets of `prompt_tokens`,
+/// whereas for `Anthropic`/Bedrock-style responses the cache counters are
+/// reported in addition to `inputTokens`.
 #[must_use]
 pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
     let usage = &value["usage"];
@@ -314,7 +315,10 @@ pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
             .or_else(|| usage["cache_read_input_tokens"].as_u64())
             .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
             .unwrap_or(0),
-        cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        cache_creation_input_tokens: usage["prompt_tokens_details"]["cache_write_tokens"]
+            .as_u64()
+            .or_else(|| usage["cache_creation_input_tokens"].as_u64())
+            .unwrap_or(0),
     }
 }
 

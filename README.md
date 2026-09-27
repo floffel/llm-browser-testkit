@@ -943,6 +943,42 @@ while for Anthropic/Bedrock the cache counters are reported **in addition** to
 cached-output metric. Cost is charged at the configured flat input price, so
 cache discounts are not applied.
 
+### Prompt-caching support matrix
+
+`provider = "openai"` is OpenAI-compatible, so any endpoint that speaks the
+chat-completions shape (OpenRouter, Groq, xAI, DeepSeek, Together, Fireworks,
+local vLLM/llama.cpp, …) is reachable and uses the shared extraction below.
+Provider-native-only APIs (Google Gemini `generateContent`, Anthropic
+`/v1/messages`) are only parsed via their cache-field fallbacks, not as a full
+request/response protocol.
+
+| Provider / endpoint | Cache read field | Cache write field | Enabling | Read/write token semantics | Parsed by this library |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI (Chat Completions & Responses) | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` (GPT-5.6+) | automatic (implicit) or explicit `prompt_cache_breakpoint` | both are **subsets** of `prompt_tokens`/`input_tokens` | read ✅, write ✅ |
+| Azure OpenAI | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` (GPT-5.6+) | automatic; explicit breakpoints GPT-5.6+ | subsets of `prompt_tokens` | read ✅, write ✅ |
+| OpenRouter | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` | depends on upstream model | subsets of `prompt_tokens` | read ✅, write ✅ |
+| Groq | `prompt_tokens_details.cached_tokens` | — (none) | automatic, GPT-OSS models only | subset of `prompt_tokens` | read ✅, write n/a |
+| xAI (Grok) | `prompt_tokens_details.cached_tokens` | — (none) | automatic | subset of `prompt_tokens` | read ✅, write n/a |
+| DeepSeek | `prompt_cache_hit_tokens` | — (none; `prompt_cache_miss_tokens` is the uncached part) | automatic | subset of `prompt_tokens` | read ✅, write n/a |
+| Anthropic Messages (native) | `cache_read_input_tokens` | `cache_creation_input_tokens` | `cache_control` block/auto | **additional** to `input_tokens` | fields ✅ (not a native transport) |
+| AWS Bedrock Converse | `cacheReadInputTokens` | `cacheWriteInputTokens` (+ `cacheDetails` TTL breakdown) | `cachePoint` block | **additional** to `inputTokens` | read ✅, write ✅ (`cacheDetails` not read) |
+| Google Gemini `generateContent` (native) | `usageMetadata.cachedContentTokenCount` | — (none) | explicit cached content / implicit | separate counter | ❌ not parsed (native shape) |
+| Google Vertex AI (Anthropic models) | `cache_read_input_tokens` | `cache_creation_input_tokens` | `cache_control` | additional to `input_tokens` | fields ✅ (via fallback) |
+
+Notes:
+
+- Cache **writes** are only meaningful for providers with explicit caching and
+  cache-write billing. OpenAI-family and Groq/xAI/DeepSeek auto-cache and
+  expose reads only; their write counter stays `0`.
+- Because write/read counters are subsets for OpenAI-style providers but
+  additive for Anthropic/Bedrock, `Total input` is the provider-reported input
+  count: for OpenAI-style providers it already includes cache reads/writes,
+  while for Anthropic/Bedrock the true processed prompt is
+  `input + cached + cache write`.
+- Cost uses only `input_price_per_1m` / `output_price_per_1m`; the cache-read
+  discount (≈0.1×) and cache-write surcharge (≈1.25×, where billed) are not
+  modelled.
+
 ## Parallel runs
 
 Pass several scenario files to run them concurrently. Each file executes on
