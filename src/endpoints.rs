@@ -6,7 +6,30 @@ use crate::scenario::AuthConfig;
 use crate::scenario::AwsConfig;
 use crate::scenario::EndpointConfig;
 use crate::scenario::EndpointType;
+use crate::scenario::PricingConfig;
 use crate::scenario::Provider;
+
+/// Resolves the cache price per 1M tokens: an explicit price when set,
+/// otherwise the input price scaled by the read/write multiplier (defaults
+/// 0.1× read and 1.25× write).
+fn cache_price(pricing: Option<&PricingConfig>, input_price: f64, read: bool) -> f64 {
+    let Some(p) = pricing else {
+        return 0.0;
+    };
+    let explicit = if read {
+        p.cached_input_per_1m_tokens
+    } else {
+        p.cache_write_per_1m_tokens
+    };
+    explicit.unwrap_or_else(|| {
+        let multiplier = if read {
+            p.cache_read_multiplier.unwrap_or(0.1)
+        } else {
+            p.cache_write_multiplier.unwrap_or(1.25)
+        };
+        input_price * multiplier
+    })
+}
 
 /// Classification of a task for endpoint routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,6 +77,14 @@ pub struct ResolvedEndpoint {
     pub input_price_per_1m: f64,
     /// Output token pricing per 1M tokens.
     pub output_price_per_1m: f64,
+    /// Cached-input (prompt cache read) pricing per 1M tokens.
+    pub cached_input_price_per_1m: f64,
+    /// Cache-write (cache creation) input pricing per 1M tokens.
+    pub cache_write_price_per_1m: f64,
+    /// Bill cache reads/writes at their cache rates (default `true`).
+    pub cache_pricing: bool,
+    /// Send provider-side prompt-cache markers (default `true`).
+    pub cache_markers: bool,
     /// Flat cost per call.
     pub per_call_price: f64,
     /// Retry budget for a single chat completion (default 3; global env
@@ -92,6 +123,10 @@ impl ResolvedEndpoint {
             vision: false,
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
+            cached_input_price_per_1m: 0.0,
+            cache_write_price_per_1m: 0.0,
+            cache_pricing: true,
+            cache_markers: true,
             per_call_price: 0.0,
             max_attempts: crate::default_llm_attempts(),
             fallbacks: Vec::new(),
@@ -103,6 +138,15 @@ impl ResolvedEndpoint {
             aws: AwsConfig::default(),
         }
     }
+}
+
+/// Global defaults applied to endpoints that do not override them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EndpointDefaults {
+    /// Default for provider-side prompt-cache markers.
+    pub cache: Option<bool>,
+    /// Default for cache-aware cost pricing.
+    pub cache_pricing: Option<bool>,
 }
 
 /// Registry of all configured endpoints with routing logic.
@@ -122,9 +166,11 @@ impl EndpointRegistry {
     /// scenarios without an explicit endpoint table. Without a fallback,
     /// environment variables are used.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn from_config(
         endpoints: &HashMap<String, EndpointConfig>,
         fallback_llm: Option<&crate::LlmConfig>,
+        defaults: EndpointDefaults,
     ) -> Self {
         if endpoints.is_empty() {
             let default_llm =
@@ -140,6 +186,10 @@ impl EndpointRegistry {
                     vision: false,
                     input_price_per_1m: 0.0,
                     output_price_per_1m: 0.0,
+                    cached_input_price_per_1m: 0.0,
+                    cache_write_price_per_1m: 0.0,
+                    cache_pricing: defaults.cache_pricing.unwrap_or(true),
+                    cache_markers: defaults.cache.unwrap_or(true),
                     per_call_price: 0.0,
                     max_attempts: llm.max_attempts,
                     fallbacks: Vec::new(),
@@ -199,6 +249,23 @@ impl EndpointRegistry {
                 vision: ec.vision,
                 input_price_per_1m: ec.pricing.as_ref().map_or(0.0, |p| p.input_per_1m_tokens),
                 output_price_per_1m: ec.pricing.as_ref().map_or(0.0, |p| p.output_per_1m_tokens),
+                cached_input_price_per_1m: cache_price(
+                    ec.pricing.as_ref(),
+                    ec.pricing.as_ref().map_or(0.0, |p| p.input_per_1m_tokens),
+                    true,
+                ),
+                cache_write_price_per_1m: cache_price(
+                    ec.pricing.as_ref(),
+                    ec.pricing.as_ref().map_or(0.0, |p| p.input_per_1m_tokens),
+                    false,
+                ),
+                cache_pricing: ec
+                    .pricing
+                    .as_ref()
+                    .and_then(|p| p.cache_pricing)
+                    .or(defaults.cache_pricing)
+                    .unwrap_or(true),
+                cache_markers: ec.cache.or(defaults.cache).unwrap_or(true),
                 per_call_price: ec.pricing.as_ref().map_or(0.0, |p| p.per_call),
                 max_attempts: ec.max_attempts.unwrap_or_else(crate::default_llm_attempts),
                 fallbacks: ec.fallbacks.clone(),
@@ -323,7 +390,7 @@ mod tests {
     #[test]
     fn test_registry_empty_config() {
         let endpoints = HashMap::new();
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         assert_eq!(registry.len(), 1);
         let ep = registry.get("default").unwrap();
         assert_eq!(ep.endpoint_type, EndpointType::Llm);
@@ -342,7 +409,7 @@ mod tests {
             },
         );
 
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         let ep = registry.get("vision");
         assert!(ep.is_some());
         assert_eq!(ep.unwrap().model.as_deref(), Some("gpt-4o"));
@@ -360,7 +427,7 @@ mod tests {
         };
         endpoints.insert("main".to_owned(), ec);
 
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         let ep = registry.resolve_for_task(TaskType::Targeting);
         assert_eq!(ep.name, "main");
     }
@@ -386,7 +453,7 @@ mod tests {
             },
         );
 
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         let ep = registry.resolve(Some("fast"), TaskType::Targeting);
         assert_eq!(ep.name, "fast");
     }
@@ -414,7 +481,7 @@ mod tests {
             },
         );
 
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         let chain = registry.resolve_chain(None, TaskType::Assertion);
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].name, "default");
@@ -454,7 +521,7 @@ mod tests {
             },
         );
 
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         let chain = registry.resolve_chain(None, TaskType::Assertion);
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].name, "default");
@@ -474,7 +541,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let registry = EndpointRegistry::from_config(&endpoints, None);
+        let registry = EndpointRegistry::from_config(&endpoints, None, EndpointDefaults::default());
         let ep = registry.resolve_chain(None, TaskType::Assertion);
         assert_eq!(ep[0].max_attempts, 7);
     }

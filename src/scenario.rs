@@ -176,7 +176,6 @@ pub struct ScenarioConfig {
     #[serde(default = "default_layout_ignore_classes")]
     pub layout_ignore_classes: Vec<String>,
     /// Concurrency group for parallel runs across scenario files.
-    ///
     /// When several scenario files are run together (`--parallel > 1`),
     /// files that declare the **same** `concurrency_group` are never
     /// executed at the same time — use this for files that touch the same
@@ -187,6 +186,16 @@ pub struct ScenarioConfig {
     /// which always run sequentially.
     #[serde(default)]
     pub concurrency_group: Option<String>,
+    /// Default for per-endpoint `cache` across all endpoints (default
+    /// `true`). Set to `false` to disable provider-side prompt-cache
+    /// markers globally.
+    #[serde(default)]
+    pub cache: Option<bool>,
+    /// Default for per-endpoint `pricing.cache_pricing` across all
+    /// endpoints (default `true`). Set to `false` to bill all prompt
+    /// tokens at the flat input price instead of cache rates.
+    #[serde(default)]
+    pub cache_pricing: Option<bool>,
 }
 
 /// A list of named viewports a scenario is expanded across.
@@ -268,6 +277,13 @@ pub struct EndpointConfig {
     /// Pricing configuration.
     #[serde(default)]
     pub pricing: Option<PricingConfig>,
+    /// Automatically fetch exact per-token pricing for this endpoint from a
+    /// provider's public pricing API, filling in any pricing fields left
+    /// unset. `"openrouter"` always uses the `OpenRouter` models API;
+    /// `"auto"` does so only when the endpoint URL host is `openrouter.ai`.
+    /// Explicit `pricing` values win over fetched ones.
+    #[serde(default)]
+    pub pricing_source: Option<String>,
     /// Task types this endpoint serves by default
     /// (e.g. `["targeting", "assertion"]`).
     #[serde(default)]
@@ -319,6 +335,15 @@ pub struct EndpointConfig {
     /// AWS credential settings (`provider = "bedrock"`).
     #[serde(default)]
     pub aws: AwsConfig,
+    /// Send provider-side prompt-cache markers from this endpoint
+    /// (default `true`). Only providers that require explicit markers are
+    /// affected: AWS Bedrock gets a `cachePoint` block, and Anthropic-style
+    /// OpenAI-compatible models (model name contains `claude`/`anthropic`,
+    /// e.g. via `OpenRouter`) get a `cache_control: ephemeral` block on the
+    /// system message. `OpenAI`, `Azure`, Groq, xAI and `DeepSeek` cache
+    /// automatically and need no markers. Set to `false` to disable.
+    #[serde(default)]
+    pub cache: Option<bool>,
 }
 
 /// Type discriminator for endpoint configuration.
@@ -457,6 +482,26 @@ pub struct PricingConfig {
     /// Flat cost per call (USD), used for MCP/agent endpoints.
     #[serde(default)]
     pub per_call: f64,
+    /// Cost per 1M cached-input (prompt cache read) tokens (USD). When
+    /// unset, `input_per_1m_tokens * cache_read_multiplier` is used.
+    #[serde(default)]
+    pub cached_input_per_1m_tokens: Option<f64>,
+    /// Cost per 1M cache-write (cache creation) input tokens (USD). When
+    /// unset, `input_per_1m_tokens * cache_write_multiplier` is used.
+    #[serde(default)]
+    pub cache_write_per_1m_tokens: Option<f64>,
+    /// Multiplier applied to `input_per_1m_tokens` for cache reads when
+    /// `cached_input_per_1m_tokens` is unset. Default: 0.1.
+    #[serde(default)]
+    pub cache_read_multiplier: Option<f64>,
+    /// Multiplier applied to `input_per_1m_tokens` for cache writes when
+    /// `cache_write_per_1m_tokens` is unset. Default: 1.25.
+    #[serde(default)]
+    pub cache_write_multiplier: Option<f64>,
+    /// Bill cache reads/writes at their cache rates (default `true`). Set
+    /// to `false` to bill every prompt token at the flat input price.
+    #[serde(default)]
+    pub cache_pricing: Option<bool>,
 }
 
 /// Budget limits for test execution.

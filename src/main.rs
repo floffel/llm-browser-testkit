@@ -563,13 +563,36 @@ async fn main() -> anyhow::Result<()> {
             // Parse every scenario file, apply CLI overrides + the viewport
             // matrix, and build one runnable ScenarioFile per path. Each file
             // keeps its own config/definitions/tests.
+            let pricing_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok();
             let mut files: Vec<ScenarioFile> = Vec::new();
             for path in scenario {
                 let toml_content = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 let mut scenario_def: Scenario =
                     toml::from_str(&toml_content).with_context(|| "parsing scenario TOML")?;
-                let config = apply_cli_overrides(scenario_def.config.clone(), &overrides);
+                let mut config = apply_cli_overrides(scenario_def.config.clone(), &overrides);
+                if config
+                    .endpoints
+                    .values()
+                    .any(|ec| ec.pricing_source.is_some())
+                {
+                    if let Some(client) = &pricing_client {
+                        match llm_browser_testkit::pricing::apply_auto_pricing(
+                            &mut config.endpoints,
+                            client,
+                        )
+                        .await
+                        {
+                            Ok(0) => {}
+                            Ok(n) => reporter
+                                .info(format!("pricing: filled exact prices for {n} endpoint(s)")),
+                            Err(e) => reporter.warn(format!("pricing lookup skipped: {e}")),
+                        }
+                    }
+                }
                 let test_count = scenario_def.test.len();
                 let definitions = std::mem::take(&mut scenario_def.definitions);
                 let tests = expand_viewport_matrix(

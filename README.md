@@ -933,15 +933,41 @@ llm-browser-testkit run scenario.toml --max-cost 10.0 --max-tokens 1000000 --bud
 Prompt-cache token counters are reported per provider. **Cache read** tokens
 (`cached`) are prompt tokens served from a cache; **cache write** tokens are
 prompt tokens written into a cache. The counters are captured from
-OpenAI/OpenRouter (`prompt_tokens_details.cached_tokens`), Anthropic-style
-responses (`cache_read_input_tokens` / `cache_creation_input_tokens`), DeepSeek
-(`prompt_cache_hit_tokens`), and AWS Bedrock Converse
-(`cacheReadInputTokens` / `cacheWriteInputTokens`). Semantics differ by
-provider: for OpenAI the cached count is a **subset** of the input tokens,
-while for Anthropic/Bedrock the cache counters are reported **in addition** to
-`inputTokens`. Only input (prompt) caching exists — no provider exposes a
-cached-output metric. Cost is charged at the configured flat input price, so
-cache discounts are not applied.
+OpenAI/Azure/OpenRouter (`prompt_tokens_details.cached_tokens` /
+`cache_write_tokens`), Anthropic-style responses (`cache_read_input_tokens` /
+`cache_creation_input_tokens`), DeepSeek (`prompt_cache_hit_tokens`), Google
+Gemini (`usageMetadata.cachedContentTokenCount`), and AWS Bedrock Converse
+(`cacheReadInputTokens` / `cacheWriteInputTokens` / `cacheDetails`). Semantics
+differ by provider: for OpenAI-style responses the cached counts are a
+**subset** of the input tokens, while for Anthropic/Bedrock the cache counters
+are reported **in addition** to `inputTokens`. Only input (prompt) caching
+exists — no provider exposes a cached-output metric.
+
+### Prompt caching: enabled by default
+
+Caching is **on by default** and only sends request-side markers where a
+provider requires them:
+
+- **AWS Bedrock** gets a `cachePoint` block after the system message.
+- **Anthropic-style OpenAI-compatible models** (model name contains
+  `claude`/`anthropic`, e.g. via OpenRouter) get a
+  `cache_control: {"type":"ephemeral"}` block on the system message.
+- OpenAI, Azure, Groq, xAI and DeepSeek cache automatically; no marker is
+  sent.
+
+If a Bedrock model does not support prompt caching, the `cachePoint` block is
+rejected with HTTP 400 and the call is retried once **without** it, so caching
+never breaks an otherwise valid call.
+
+Disable it globally or per endpoint:
+
+```toml
+[config]
+cache = false            # global default for all endpoints
+
+[config.endpoints.default]
+cache = false            # or just this endpoint
+```
 
 ### Prompt-caching support matrix
 
@@ -956,13 +982,13 @@ request/response protocol.
 | --- | --- | --- | --- | --- | --- |
 | OpenAI (Chat Completions & Responses) | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` (GPT-5.6+) | automatic (implicit) or explicit `prompt_cache_breakpoint` | both are **subsets** of `prompt_tokens`/`input_tokens` | read ✅, write ✅ |
 | Azure OpenAI | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` (GPT-5.6+) | automatic; explicit breakpoints GPT-5.6+ | subsets of `prompt_tokens` | read ✅, write ✅ |
-| OpenRouter | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` | depends on upstream model | subsets of `prompt_tokens` | read ✅, write ✅ |
+| OpenRouter | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` | `cache_control` (sent for Claude models) | subsets of `prompt_tokens` | read ✅, write ✅ |
 | Groq | `prompt_tokens_details.cached_tokens` | — (none) | automatic, GPT-OSS models only | subset of `prompt_tokens` | read ✅, write n/a |
 | xAI (Grok) | `prompt_tokens_details.cached_tokens` | — (none) | automatic | subset of `prompt_tokens` | read ✅, write n/a |
 | DeepSeek | `prompt_cache_hit_tokens` | — (none; `prompt_cache_miss_tokens` is the uncached part) | automatic | subset of `prompt_tokens` | read ✅, write n/a |
 | Anthropic Messages (native) | `cache_read_input_tokens` | `cache_creation_input_tokens` | `cache_control` block/auto | **additional** to `input_tokens` | fields ✅ (not a native transport) |
-| AWS Bedrock Converse | `cacheReadInputTokens` | `cacheWriteInputTokens` (+ `cacheDetails` TTL breakdown) | `cachePoint` block | **additional** to `inputTokens` | read ✅, write ✅ (`cacheDetails` not read) |
-| Google Gemini `generateContent` (native) | `usageMetadata.cachedContentTokenCount` | — (none) | explicit cached content / implicit | separate counter | ❌ not parsed (native shape) |
+| AWS Bedrock Converse | `cacheReadInputTokens` | `cacheWriteInputTokens` (+ `cacheDetails` per-TTL) | `cachePoint` block (sent by default) | **additional** to `inputTokens` | read ✅, write ✅ (`cacheDetails` summed into cache write) |
+| Google Gemini `generateContent` (native) | `usageMetadata.cachedContentTokenCount` | — (none) | explicit cached content / implicit | separate counter | read ✅ (via `usageMetadata` fallback) |
 | Google Vertex AI (Anthropic models) | `cache_read_input_tokens` | `cache_creation_input_tokens` | `cache_control` | additional to `input_tokens` | fields ✅ (via fallback) |
 
 Notes:
@@ -975,9 +1001,50 @@ Notes:
   count: for OpenAI-style providers it already includes cache reads/writes,
   while for Anthropic/Bedrock the true processed prompt is
   `input + cached + cache write`.
-- Cost uses only `input_price_per_1m` / `output_price_per_1m`; the cache-read
-  discount (≈0.1×) and cache-write surcharge (≈1.25×, where billed) are not
-  modelled.
+
+### Cache-aware cost pricing
+
+Costs are cache-aware by default: cache reads are billed at
+`input_price_per_1m × 0.1` and cache writes at `input_price_per_1m × 1.25`
+(industry-standard multipliers), with cache tokens treated as a subset or as
+additive to input depending on the provider. Override or disable:
+
+```toml
+[config.endpoints.default.pricing]
+input_per_1m_tokens = 3.0
+output_per_1m_tokens = 15.0
+cached_input_per_1m_tokens = 0.30   # optional, overrides the 0.1x multiplier
+cache_write_per_1m_tokens = 3.75    # optional, overrides the 1.25x multiplier
+cache_read_multiplier = 0.1         # optional
+cache_write_multiplier = 1.25       # optional
+cache_pricing = false               # bill every prompt token at the input price
+```
+
+### Automatic pricing lookup
+
+Pricing is **not** fetched automatically by default — it comes from the
+`pricing` block above. Where a provider exposes **exact**, machine-readable
+prices, you can opt in with `pricing_source`:
+
+```toml
+[config.endpoints.default]
+model = "anthropic/claude-3.5-sonnet"
+pricing_source = "openrouter"   # or "auto" (only when the URL is openrouter.ai)
+```
+
+`openrouter` fetches exact per-token `prompt`, `completion`, `input_cache_read`
+and `input_cache_write` prices from `GET https://openrouter.ai/api/v1/models`
+and fills only the pricing fields you left unset (explicit values win). A
+lookup failure is non-fatal: the run continues with the configured pricing.
+
+| Provider | Exact public price API? | Status in this library |
+| --- | --- | --- |
+| OpenRouter | Yes — `/api/v1/models` (no auth) | ✅ `pricing_source = "openrouter"` |
+| AWS Bedrock | Partly — Price List has per-model cache usage types, but names vary (`-input-tokens` vs `-input-token-count`, `-flex`/`-priority`/`-cross-region-global` tiers) and prices are per region/partition | ❌ not implemented (no reliable exact model→SKU mapping) |
+| Azure OpenAI | Partly — Retail Prices API is public but model→meter mapping is heuristic | ❌ not implemented |
+| OpenAI, Groq, xAI, DeepSeek | No public price API | ❌ configure `pricing` manually |
+| Google Gemini / Vertex | Pricing page only; Cloud Billing Catalog needs a key and does not expose Gemini dev prices | ❌ configure `pricing` manually |
+
 
 ## Parallel runs
 

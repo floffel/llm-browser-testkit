@@ -39,6 +39,7 @@ pub mod mcp_client;
 pub mod mcp_server;
 /// Concurrent execution of multiple scenario files across isolated browsers.
 pub mod parallel;
+pub mod pricing;
 /// Secret redaction for every report sink.
 pub mod redact;
 /// Run reporting: console, NDJSON, JUnit, GitHub and Perfetto sinks.
@@ -94,6 +95,11 @@ pub struct LlmConfig {
     /// Provider-specific parameters merged into the request body
     /// (e.g. `effort = "high"` for Anthropic).
     pub model_params: HashMap<String, Value>,
+    /// Send provider-side prompt-cache markers (default `true`). Applies to
+    /// providers that need explicit markers: AWS Bedrock (`cachePoint`) and
+    /// Anthropic-style OpenAI-compatible models (`cache_control`). Set to
+    /// `false` to disable.
+    pub cache: bool,
     /// How many times a single call to this endpoint is retried on
     /// transient failures before giving up (or moving to the next fallback
     /// endpoint). Default 3; override globally with
@@ -130,6 +136,7 @@ impl Default for LlmConfig {
             temperature: 0.0,
             thinking: None,
             model_params: HashMap::new(),
+            cache: true,
             max_attempts: default_llm_attempts(),
             provider: Provider::Openai,
             deployment: None,
@@ -155,6 +162,7 @@ impl LlmConfig {
             temperature: 0.0,
             thinking: None,
             model_params: HashMap::new(),
+            cache: true,
             max_attempts: default_llm_attempts(),
             provider: Provider::Openai,
             deployment: None,
@@ -691,7 +699,24 @@ fn build_openai_payload(
             }
         }
     }
+    // Explicit prompt caching for Anthropic-style models (direct or via a
+    // gateway such as OpenRouter): mark the static system block so the
+    // provider caches everything up to it. OpenAI/Azure/Groq/xAI/DeepSeek
+    // cache automatically and must not receive this marker.
+    if llm.cache && !system.is_empty() && is_anthropic_style_model(&llm.model) {
+        payload["messages"][0]["content"] = serde_json::json!([
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]);
+    }
     payload
+}
+
+/// Whether a model name suggests an Anthropic-style API that uses explicit
+/// `cache_control` markers (directly or via a gateway such as `OpenRouter`).
+#[must_use]
+fn is_anthropic_style_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("claude") || model.contains("anthropic")
 }
 
 /// JavaScript to extract interactive elements from the current page.
@@ -817,6 +842,7 @@ mod tests {
             temperature: 0.0,
             thinking: None,
             model_params: std::collections::HashMap::new(),
+            cache: true,
             max_attempts: attempts,
             provider: Provider::Openai,
             deployment: None,

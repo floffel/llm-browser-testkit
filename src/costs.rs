@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use crate::endpoints::ResolvedEndpoint;
+use crate::scenario::Provider;
 
 /// Accumulated usage for a single endpoint.
 #[derive(Debug, Default, Clone)]
@@ -128,7 +129,7 @@ impl UsageTracker {
         model: &str,
         usage: &LlmUsage,
     ) {
-        let cost = calculate_llm_cost(endpoint, usage.prompt_tokens, usage.completion_tokens);
+        let cost = calculate_llm_cost(endpoint, usage);
         let mut inner = self.inner.lock().unwrap();
         let eu = inner
             .per_endpoint
@@ -251,17 +252,63 @@ impl Default for UsageTracker {
     }
 }
 
+/// How a provider reports cache tokens relative to its input token count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheAccounting {
+    /// Cache tokens are a **subset** of the reported input tokens
+    /// (`OpenAI`, `Azure`, `OpenRouter`, Groq, xAI, `DeepSeek`, …).
+    Subset,
+    /// Cache tokens are reported **in addition** to the input tokens
+    /// (`Anthropic` Messages and AWS Bedrock Converse).
+    Additive,
+}
+
+/// Returns the cache accounting convention for a provider.
+#[must_use]
+pub const fn cache_accounting(provider: Provider) -> CacheAccounting {
+    match provider {
+        Provider::Openai | Provider::Azure => CacheAccounting::Subset,
+        Provider::Bedrock => CacheAccounting::Additive,
+    }
+}
+
 /// Calculates the cost of an LLM call based on token pricing.
+///
+/// When [`ResolvedEndpoint::cache_pricing`] is enabled (the default), cache
+/// reads and writes are billed at their cache rates; otherwise every prompt
+/// token is billed at the flat input price. Cache tokens are treated as a
+/// subset or as additive to the input count depending on the provider (see
+/// [`CacheAccounting`]).
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 #[must_use]
-pub fn calculate_llm_cost(
-    endpoint: &ResolvedEndpoint,
-    input_tokens: u64,
-    output_tokens: u64,
-) -> f64 {
-    let input_cost = (input_tokens as f64 / 1_000_000.0) * endpoint.input_price_per_1m;
-    let output_cost = (output_tokens as f64 / 1_000_000.0) * endpoint.output_price_per_1m;
-    input_cost + output_cost
+pub fn calculate_llm_cost(endpoint: &ResolvedEndpoint, usage: &LlmUsage) -> f64 {
+    let million = 1_000_000.0;
+    let (ordinary_input, cached, cache_write) =
+        if cache_accounting(endpoint.provider) == CacheAccounting::Subset {
+            (
+                usage
+                    .prompt_tokens
+                    .saturating_sub(usage.cached_input_tokens)
+                    .saturating_sub(usage.cache_creation_input_tokens),
+                usage.cached_input_tokens,
+                usage.cache_creation_input_tokens,
+            )
+        } else {
+            (
+                usage.prompt_tokens,
+                usage.cached_input_tokens,
+                usage.cache_creation_input_tokens,
+            )
+        };
+    let input_cost = if endpoint.cache_pricing {
+        (ordinary_input as f64 / million) * endpoint.input_price_per_1m
+            + (cached as f64 / million) * endpoint.cached_input_price_per_1m
+            + (cache_write as f64 / million) * endpoint.cache_write_price_per_1m
+    } else {
+        ((ordinary_input + cached + cache_write) as f64 / million) * endpoint.input_price_per_1m
+    };
+    let output_cost = (usage.completion_tokens as f64 / million) * endpoint.output_price_per_1m;
+    input_cost + output_cost + endpoint.per_call_price
 }
 
 /// Usage info extracted from an LLM API response.
@@ -306,6 +353,9 @@ pub struct LlmResponse {
 #[must_use]
 pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
     let usage = &value["usage"];
+    if usage.is_null() {
+        return extract_gemini_usage(value);
+    }
     LlmUsage {
         prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
         completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
@@ -322,11 +372,29 @@ pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
     }
 }
 
+/// Fallback extraction for a native Google Gemini `generateContent` response,
+/// which reports usage under `usageMetadata` rather than `usage`:
+/// `promptTokenCount` / `candidatesTokenCount` / `totalTokenCount` and the
+/// prompt-cache read counter `cachedContentTokenCount`. Returns an all-zero
+/// usage when neither shape is present.
+#[must_use]
+fn extract_gemini_usage(value: &serde_json::Value) -> LlmUsage {
+    let metadata = &value["usageMetadata"];
+    LlmUsage {
+        prompt_tokens: metadata["promptTokenCount"].as_u64().unwrap_or(0),
+        completion_tokens: metadata["candidatesTokenCount"].as_u64().unwrap_or(0),
+        total_tokens: metadata["totalTokenCount"].as_u64().unwrap_or(0),
+        cached_input_tokens: metadata["cachedContentTokenCount"].as_u64().unwrap_or(0),
+        cache_creation_input_tokens: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::costs::{calculate_llm_cost, LlmUsage, UsageTracker};
     use crate::endpoints::ResolvedEndpoint;
     use crate::scenario::EndpointType;
+    use crate::scenario::Provider;
 
     fn make_endpoint(
         name: &str,
@@ -346,10 +414,14 @@ mod tests {
             vision: false,
             input_price_per_1m: input_price,
             output_price_per_1m: output_price,
+            cached_input_price_per_1m: input_price * 0.1,
+            cache_write_price_per_1m: input_price * 1.25,
+            cache_pricing: true,
+            cache_markers: true,
             per_call_price: per_call,
             max_attempts: 3,
             fallbacks: vec![],
-            provider: crate::scenario::Provider::Openai,
+            provider: Provider::Openai,
             deployment: None,
             api_version: None,
             auth: crate::scenario::AuthConfig::default(),
@@ -372,15 +444,45 @@ mod tests {
     fn test_calculate_llm_cost() {
         let ep = make_endpoint("test", 0.15, 0.60, 0.0);
         // 1M input tokens = $0.15, 500K output = $0.30
-        let cost = calculate_llm_cost(&ep, 1_000_000, 500_000);
+        let cost = calculate_llm_cost(&ep, &usage(1_000_000, 500_000, 0));
         assert!((cost - 0.45).abs() < 0.001);
     }
 
     #[test]
     fn test_calculate_zero_cost() {
         let ep = make_endpoint("free", 0.0, 0.0, 0.0);
-        let cost = calculate_llm_cost(&ep, 1_000_000, 1_000_000);
+        let cost = calculate_llm_cost(&ep, &usage(1_000_000, 1_000_000, 0));
         assert!((cost - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_calculate_llm_cost_cache_subset() {
+        // OpenAI-style: cached tokens are a subset of prompt_tokens.
+        let ep = make_endpoint("gpt", 1.0, 0.0, 0.0);
+        let cost = calculate_llm_cost(&ep, &usage(1_000_000, 0, 1_000_000));
+        // All input is cached at 0.1x => $0.10.
+        assert!((cost - 0.10).abs() < 0.001, "got {cost}");
+    }
+
+    #[test]
+    fn test_calculate_llm_cost_cache_additive_bedrock() {
+        // Bedrock/Anthropic-style: cache tokens are additional to input.
+        let mut ep = make_endpoint("bedrock", 1.0, 0.0, 0.0);
+        ep.provider = Provider::Bedrock;
+        let cost = calculate_llm_cost(&ep, &usage(1_000_000, 0, 1_000_000));
+        // 1M ordinary input ($1.00) + 1M cached read ($0.10).
+        assert!((cost - 1.10).abs() < 0.001, "got {cost}");
+    }
+
+    #[test]
+    fn test_calculate_llm_cost_cache_pricing_disabled() {
+        // With cache pricing off, every prompt token is billed at input price
+        // even for additive (Bedrock) accounting.
+        let mut ep = make_endpoint("bedrock", 1.0, 0.0, 0.0);
+        ep.provider = Provider::Bedrock;
+        ep.cache_pricing = false;
+        let cost = calculate_llm_cost(&ep, &usage(1_000_000, 0, 1_000_000));
+        assert!((cost - 2.0).abs() < 0.001, "got {cost}");
     }
 
     #[test]

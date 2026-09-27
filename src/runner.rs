@@ -447,6 +447,7 @@ impl ScenarioRunner {
             temperature: scenario_config.temperature,
             thinking: scenario_config.thinking,
             model_params: scenario_config.model_params.clone(),
+            cache: scenario_config.cache.unwrap_or(true),
             max_attempts: crate::default_llm_attempts(),
             provider: crate::scenario::Provider::Openai,
             deployment: None,
@@ -455,7 +456,14 @@ impl ScenarioRunner {
             header_commands: std::collections::HashMap::new(),
             aws: crate::scenario::AwsConfig::default(),
         };
-        let endpoints = EndpointRegistry::from_config(&scenario_config.endpoints, Some(&llm));
+        let endpoints = EndpointRegistry::from_config(
+            &scenario_config.endpoints,
+            Some(&llm),
+            crate::endpoints::EndpointDefaults {
+                cache: scenario_config.cache,
+                cache_pricing: scenario_config.cache_pricing,
+            },
+        );
         let budgets = BudgetTracker::from_config(&scenario_config.budgets);
         let defs_map: HashMap<String, AssertDefinition> = definitions
             .into_iter()
@@ -1944,6 +1952,7 @@ impl ScenarioRunner {
             temperature: self.llm.temperature,
             thinking: self.llm.thinking,
             model_params: self.llm.model_params.clone(),
+            cache: endpoint.cache_markers,
             max_attempts: endpoint.max_attempts.max(1),
             provider: endpoint.provider,
             deployment: endpoint.deployment.clone(),
@@ -2054,11 +2063,7 @@ impl ScenarioRunner {
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
             Ok((lr, idx)) => {
-                let cost = calculate_llm_cost(
-                    chain[idx],
-                    lr.usage.prompt_tokens,
-                    lr.usage.completion_tokens,
-                );
+                let cost = calculate_llm_cost(chain[idx], &lr.usage);
                 let answering = chain[idx].name.clone();
                 let model = chain[idx]
                     .model

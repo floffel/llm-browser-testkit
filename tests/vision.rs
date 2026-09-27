@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use llm_browser_testkit::endpoints::{EndpointRegistry, TaskType};
+use llm_browser_testkit::endpoints::{EndpointDefaults, EndpointRegistry, TaskType};
 use llm_browser_testkit::llm_chat_vision_with_usage;
 use llm_browser_testkit::LlmConfig;
 use wiremock::matchers::{method, path};
@@ -52,7 +52,11 @@ steps = []
     let ep = &scenario.config.endpoints["vision"];
     assert!(ep.vision, "vision flag must parse");
 
-    let registry = EndpointRegistry::from_config(&scenario.config.endpoints, None);
+    let registry = EndpointRegistry::from_config(
+        &scenario.config.endpoints,
+        None,
+        EndpointDefaults::default(),
+    );
     let resolved = registry.get("vision").expect("resolved endpoint");
     assert!(resolved.vision);
 }
@@ -225,7 +229,7 @@ fn test_vision_endpoint_resolves_for_assertion() {
     };
     ep.vision = true;
     eps.insert("vision".to_owned(), ep);
-    let registry = EndpointRegistry::from_config(&eps, None);
+    let registry = EndpointRegistry::from_config(&eps, None, EndpointDefaults::default());
     assert!(registry.resolve(Some("vision"), TaskType::Assertion).vision);
 }
 

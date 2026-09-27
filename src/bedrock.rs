@@ -84,11 +84,6 @@ pub async fn chat_once(
         llm.url.trim_end_matches('/').to_owned()
     };
 
-    let payload = build_payload(llm, system, user, image_data_urls);
-    let body = serde_json::to_vec(&payload).map_err(|e| LlmCallError::Auth {
-        message: format!("serializing Bedrock payload: {e}"),
-    })?;
-
     let mut headers: Vec<(String, String)> = vec![
         ("content-type".to_owned(), "application/json".to_owned()),
         ("accept".to_owned(), "application/json".to_owned()),
@@ -111,16 +106,59 @@ pub async fn chat_once(
         headers.push((name.clone(), value));
     }
 
-    let signature_headers = sign_request(&url, &body, &headers, &creds)?;
+    let payload = build_payload(llm, system, user, image_data_urls, llm.cache);
+    let body = serde_json::to_vec(&payload).map_err(|e| LlmCallError::Auth {
+        message: format!("serializing Bedrock payload: {e}"),
+    })?;
+    let result = post_signed(client, &url, &headers, &creds, body).await;
 
-    let mut req = client.post(&url);
-    for (name, value) in &headers {
+    // Prompt caching is on by default; models that do not support it reject
+    // the `cachePoint` block with a 400. Retry once without the marker so
+    // caching never breaks an otherwise valid call.
+    if llm.cache {
+        if let Err(LlmCallError::Http {
+            status: 400,
+            body: err_body,
+        }) = &result
+        {
+            if mentions_cache_point(err_body) {
+                let payload = build_payload(llm, system, user, image_data_urls, false);
+                let body = serde_json::to_vec(&payload).map_err(|e| LlmCallError::Auth {
+                    message: format!("serializing Bedrock payload: {e}"),
+                })?;
+                return post_signed(client, &url, &headers, &creds, body).await;
+            }
+        }
+    }
+    result
+}
+
+/// Signs and sends a prepared Converse request body.
+async fn post_signed(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+    creds: &BedrockCredentials,
+    body: Vec<u8>,
+) -> Result<LlmResponse, LlmCallError> {
+    let signature_headers = sign_request(url, &body, headers, creds)?;
+    let mut req = client.post(url);
+    for (name, value) in headers {
         req = req.header(name.as_str(), value.as_str());
     }
     for (name, value) in &signature_headers {
         req = req.header(name.as_str(), value.as_str());
     }
     send_and_parse(req, body).await
+}
+
+/// Whether a Bedrock error body points at the prompt-cache marker, meaning
+/// the model does not support caching and the call should be retried without
+/// the `cachePoint` block.
+#[must_use]
+fn mentions_cache_point(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("cachepoint") || body.contains("cache point") || body.contains("prompt caching")
 }
 
 /// Applies `SigV4` to a Bedrock request and returns the signature headers
@@ -290,6 +328,7 @@ fn build_payload(
     system: &str,
     user: &str,
     image_data_urls: Option<&[String]>,
+    cache: bool,
 ) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
     payload.insert(
@@ -300,7 +339,14 @@ fn build_payload(
         }]),
     );
     if !system.is_empty() {
-        payload.insert("system".to_owned(), serde_json::json!([{ "text": system }]));
+        let mut system_blocks = vec![serde_json::json!({ "text": system })];
+        if cache {
+            // Mark the static system block so Bedrock caches the prompt
+            // prefix. Ignored (and retried without it) by models that do not
+            // support prompt caching.
+            system_blocks.push(serde_json::json!({ "cachePoint": { "type": "default" } }));
+        }
+        payload.insert("system".to_owned(), serde_json::Value::Array(system_blocks));
     }
     let mut inference = serde_json::Map::new();
     inference.insert("maxTokens".to_owned(), serde_json::json!(4096));
@@ -399,7 +445,19 @@ fn parse_response(json: &serde_json::Value) -> Result<LlmResponse, String> {
             completion_tokens: usage["outputTokens"].as_u64().unwrap_or(0),
             total_tokens: usage["totalTokens"].as_u64().unwrap_or(0),
             cached_input_tokens: usage["cacheReadInputTokens"].as_u64().unwrap_or(0),
-            cache_creation_input_tokens: usage["cacheWriteInputTokens"].as_u64().unwrap_or(0),
+            cache_creation_input_tokens: usage["cacheWriteInputTokens"].as_u64().unwrap_or_else(
+                || {
+                    // `cacheWriteInputTokens` is absent when caching is not
+                    // reported at the top level; fall back to the per-TTL
+                    // `cacheDetails` breakdown.
+                    usage["cacheDetails"].as_array().map_or(0, |details| {
+                        details
+                            .iter()
+                            .filter_map(|d| d["inputTokens"].as_u64())
+                            .sum()
+                    })
+                },
+            ),
         },
     })
 }
@@ -435,7 +493,9 @@ fn credential_fingerprint(aws: &AwsConfig) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_payload, build_user_content, parse_response, split_data_url};
+    use super::{
+        build_payload, build_user_content, mentions_cache_point, parse_response, split_data_url,
+    };
     use crate::costs::LlmResponse;
     use crate::scenario::AuthConfig;
     use crate::scenario::AwsConfig;
@@ -452,6 +512,7 @@ mod tests {
             temperature: 0.2,
             thinking: Some(true),
             model_params: HashMap::new(),
+            cache: true,
             max_attempts: 3,
             provider: crate::scenario::Provider::Bedrock,
             deployment: None,
@@ -464,8 +525,9 @@ mod tests {
 
     #[test]
     fn payload_text_only() {
-        let payload = build_payload(&llm_config(), "you are a QA", "check the page", None);
+        let payload = build_payload(&llm_config(), "you are a QA", "check the page", None, true);
         assert_eq!(payload["system"][0]["text"], "you are a QA");
+        assert_eq!(payload["system"][1]["cachePoint"]["type"], "default");
         assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(
             payload["messages"][0]["content"][0]["text"],
@@ -478,8 +540,29 @@ mod tests {
     }
 
     #[test]
+    fn payload_cache_disabled_omits_cache_point() {
+        let payload = build_payload(&llm_config(), "you are a QA", "check the page", None, false);
+        assert_eq!(payload["system"][0]["text"], "you are a QA");
+        assert!(
+            payload["system"].as_array().unwrap().len() == 1,
+            "no cachePoint when caching is disabled"
+        );
+    }
+
+    #[test]
+    fn cache_point_error_detection() {
+        assert!(mentions_cache_point(
+            "{\"message\":\"This model doesn't support cachePoint\"}"
+        ));
+        assert!(mentions_cache_point("prompt caching is not supported"));
+        assert!(!mentions_cache_point(
+            "{\"message\":\"Validation error: model\"}"
+        ));
+    }
+
+    #[test]
     fn payload_no_system_when_empty() {
-        let payload = build_payload(&llm_config(), "", "hi", None);
+        let payload = build_payload(&llm_config(), "", "hi", None, true);
         assert!(payload.get("system").is_none());
     }
 

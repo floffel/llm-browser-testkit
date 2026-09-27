@@ -48,6 +48,7 @@ fn llm_config(url: &str, provider: Provider) -> LlmConfig {
         temperature: 0.0,
         thinking: None,
         model_params: HashMap::new(),
+        cache: true,
         max_attempts: 1,
         provider,
         deployment: None,
