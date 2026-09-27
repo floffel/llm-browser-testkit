@@ -169,28 +169,51 @@ pub fn apply_pricing(ec: &mut EndpointConfig, pricing: &ModelPricing) {
     }
 }
 
-/// Applies automatic pricing to every endpoint that opts in.
+/// Outcome of an automatic pricing pass.
+#[derive(Debug, Default)]
+pub struct PricingOutcome {
+    /// Number of endpoints whose pricing was filled.
+    pub priced: usize,
+    /// Endpoint names where auto pricing was on but the provider has no
+    /// supported exact source; their `pricing_source` is set to `off`.
+    pub unsupported: Vec<String>,
+    /// First lookup error (non-fatal), if any.
+    pub error: Option<String>,
+}
+
+/// Whether pricing is missing on an endpoint (nothing to fill = no warning).
+fn needs_pricing(ec: &EndpointConfig) -> bool {
+    ec.pricing
+        .as_ref()
+        .is_none_or(|p| p.input_per_1m_tokens == 0.0 || p.output_per_1m_tokens == 0.0)
+}
+
+/// Whether the endpoint is in auto mode (unset or `"auto"`).
+fn is_auto(ec: &EndpointConfig) -> bool {
+    ec.pricing_source
+        .as_deref()
+        .is_none_or(|s| s.eq_ignore_ascii_case("auto"))
+}
+
+/// Applies automatic pricing to every endpoint.
 ///
-/// Returns the number of endpoints priced. Endpoints without a model, without
-/// a supported source, or whose lookup fails are left untouched. The first
-/// failure is returned as an error string while the remaining endpoints are
-/// still processed, so a single unknown model never blocks a run.
-///
-/// # Errors
-///
-/// Returns the first lookup error when **no** endpoint could be priced; a
-/// partial success returns `Ok` with the number priced.
+/// Pricing lookup is on by default (`pricing_source` unset = `"auto"`). The
+/// source is inferred from the provider: Bedrock endpoints use the AWS Price
+/// List and `openrouter.ai` URLs use the `OpenRouter` models API. Endpoints
+/// whose provider has no supported source are reported in
+/// [`PricingOutcome::unsupported`] and have `pricing_source` set to `off`.
+/// Lookup failures are collected in [`PricingOutcome::error`] and never abort
+/// the pass.
 #[allow(clippy::implicit_hasher, clippy::too_many_lines)]
 pub async fn apply_auto_pricing(
     endpoints: &mut HashMap<String, EndpointConfig>,
     client: &reqwest::Client,
-) -> Result<usize, String> {
-    let mut priced = 0;
-    let mut first_error: Option<String> = None;
+) -> PricingOutcome {
+    let mut outcome = PricingOutcome::default();
     // Fetched once per region/endpoint-kind and reused.
     let mut bedrock_catalogs: HashMap<String, HashMap<String, ModelPricing>> = HashMap::new();
     let mut openrouter_catalog: Option<serde_json::Value> = None;
-    for ec in endpoints.values_mut() {
+    for (name, ec) in endpoints.iter_mut() {
         let Some(model) = ec.model.clone() else {
             continue;
         };
@@ -200,7 +223,7 @@ pub async fn apply_auto_pricing(
                     match fetch_openrouter_models(client).await {
                         Ok(catalog) => openrouter_catalog = Some(catalog),
                         Err(e) => {
-                            first_error.get_or_insert(e);
+                            outcome.error.get_or_insert(e);
                             continue;
                         }
                     }
@@ -217,7 +240,7 @@ pub async fn apply_auto_pricing(
                             bedrock_catalogs.insert(region.clone(), catalog);
                         }
                         Err(e) => {
-                            first_error.get_or_insert(e);
+                            outcome.error.get_or_insert(e);
                             continue;
                         }
                     }
@@ -226,22 +249,27 @@ pub async fn apply_auto_pricing(
                 lookup_bedrock(catalog, &model)
                     .ok_or_else(|| format!("model `{model}` not found in Bedrock pricing"))
             }
-            None => continue,
+            None => {
+                // Auto is on but this provider exposes no exact price source:
+                // warn (when there is pricing to fill) and switch it off.
+                if is_auto(ec) && needs_pricing(ec) {
+                    outcome.unsupported.push(name.clone());
+                }
+                ec.pricing_source = Some("off".to_owned());
+                continue;
+            }
         };
         match result {
             Ok(pricing) => {
                 apply_pricing(ec, &pricing);
-                priced += 1;
+                outcome.priced += 1;
             }
             Err(e) => {
-                first_error.get_or_insert(e);
+                outcome.error.get_or_insert(e);
             }
         }
     }
-    match first_error {
-        Some(e) if priced == 0 => Err(e),
-        _ => Ok(priced),
-    }
+    outcome
 }
 
 /// Resolves the region whose Bedrock price list applies to an endpoint:
@@ -804,6 +832,24 @@ mod tests {
             ..EndpointConfig::default()
         };
         assert_eq!(source_for(&off), None);
+    }
+
+    #[tokio::test]
+    async fn auto_marks_unsupported_provider_off() {
+        let client = reqwest::Client::new();
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "oai".to_owned(),
+            EndpointConfig {
+                url: Some("https://api.openai.com/v1".to_owned()),
+                model: Some("gpt-4o".to_owned()),
+                ..EndpointConfig::default()
+            },
+        );
+        let outcome = super::apply_auto_pricing(&mut endpoints, &client).await;
+        assert_eq!(outcome.priced, 0);
+        assert_eq!(outcome.unsupported, vec!["oai".to_owned()]);
+        assert_eq!(endpoints["oai"].pricing_source.as_deref(), Some("off"));
     }
 
     fn catalog() -> serde_json::Value {

@@ -1028,7 +1028,9 @@ startup and fills only the pricing fields you left unset (explicit values
 win). A lookup failure is non-fatal: the run continues with the configured
 pricing. `auto` uses the Bedrock Price List for Bedrock endpoints and the
 OpenRouter models API for `openrouter.ai` URLs; all other providers are a
-no-op.
+no-op. When auto is on but the provider exposes no exact source (OpenAI,
+Azure, Google, Groq, xAI, DeepSeek), the endpoint is reported with a warning
+and its `pricing_source` is set to `off`.
 
 ```toml
 # auto is the default — no pricing_source needed:
@@ -1084,6 +1086,32 @@ llm-browser-testkit run checkout.toml search.toml cart.toml
 All files in one batch share the same CLI overrides and report as a single
 run: one `RunStarted`/`RunFinished` event, one merged cost report, and a
 combined exit code (non-zero if any file failed).
+
+At the end of a batch the cost report prints a **`PER-FILE SUMMARY`** (each
+file's cost, tokens and calls) followed by the combined `COST REPORT` whose
+`GLOBAL SUMMARY` totals tokens, input/output/cached/cache-write tokens and cost
+across **all** files:
+
+```console
+-------------------------------
+  PER-FILE SUMMARY
+-------------------------------
+  checkout.toml: $0.0310 | 3,100 tokens (2,000 in / 1,100 out, 400 cached, 0 cache write) | 7 calls
+  search.toml: $0.0080 |   800 tokens (  600 in /   200 out,   0 cached, 0 cache write) | 2 calls
+-------------------------------
+  COST REPORT
+  ...
+  GLOBAL SUMMARY
+    Total cost:         $0.0390
+    Total tokens:       3,900
+    Total input:        2,600
+    Total output:       1,300
+    Total cached input: 400
+    Total cache write:  0
+    Total calls:        9
+    Models used:        deepseek
+-------------------------------
+```
 
 ### Auto-scaling concurrency
 

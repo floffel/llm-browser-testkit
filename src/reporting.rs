@@ -884,6 +884,41 @@ fn write_junit_xml(cases: &[JunitCase], classname: &str, path: &Path) -> io::Res
     writer.flush()
 }
 
+/// Prints a per-file usage summary followed by the combined cost report for a
+/// multi-file (parallel) run, so the overall token/cost totals are explicit.
+pub fn print_batch_report(
+    per_file: &[(String, UsageSnapshot)],
+    per_test: &[(String, UsageSnapshot)],
+    global: &UsageSnapshot,
+) {
+    if per_file.is_empty() {
+        print_report(per_test, global);
+        return;
+    }
+
+    eprintln!();
+    eprintln!("-------------------------------");
+    eprintln!("  PER-FILE SUMMARY");
+    eprintln!("-------------------------------");
+    for (label, snapshot) in per_file {
+        eprintln!(
+            "  {label}: ${cost:.4} | {tokens} tokens \
+             ({input} in / {output} out, {cached} cached, {write} cache write) | {calls} calls",
+            cost = snapshot.total_cost,
+            tokens = snapshot.total_tokens,
+            input = snapshot.total_input_tokens,
+            output = snapshot.total_output_tokens,
+            cached = snapshot.total_cached_input_tokens,
+            write = snapshot.total_cache_creation_input_tokens,
+            calls = snapshot.total_calls,
+        );
+        if !snapshot.models.is_empty() {
+            eprintln!("    models: {}", snapshot.models.join(", "));
+        }
+    }
+    print_report(per_test, global);
+}
+
 /// Prints a cost report to stderr after all tests complete.
 pub fn print_report(per_test: &[(String, UsageSnapshot)], global: &UsageSnapshot) {
     if per_test.is_empty() {
@@ -996,8 +1031,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        escape_data, escape_property, format_duration, format_event, print_report, ColorMode,
-        Level, Palette, Reporter,
+        escape_data, escape_property, format_duration, format_event, print_batch_report,
+        print_report, ColorMode, Level, Palette, Reporter,
     };
     use crate::costs::{EndpointUsage, UsageSnapshot};
     use crate::events::{StepStatus, TestEvent};
@@ -1407,6 +1442,19 @@ mod tests {
         let per_test = vec![("test1".to_owned(), make_snapshot(0.05, 500, 3))];
         // Should not panic
         print_report(&per_test, &make_snapshot(0.05, 500, 3));
+    }
+
+    #[test]
+    fn test_print_batch_report_sums_files() {
+        let per_file = vec![
+            ("a.toml".to_owned(), make_snapshot(0.05, 500, 3)),
+            ("b.toml".to_owned(), make_snapshot(0.07, 700, 4)),
+        ];
+        let per_test = vec![("test1".to_owned(), make_snapshot(0.05, 500, 3))];
+        // Should not panic and should print the per-file + combined report.
+        print_batch_report(&per_file, &per_test, &make_snapshot(0.12, 1200, 7));
+        // Empty per-file falls back to the plain report.
+        print_batch_report(&[], &per_test, &make_snapshot(0.12, 1200, 7));
     }
 
     fn make_snapshot(cost: f64, tokens: u64, calls: u64) -> UsageSnapshot {

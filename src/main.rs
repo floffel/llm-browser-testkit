@@ -576,16 +576,25 @@ async fn main() -> anyhow::Result<()> {
                 let mut config = apply_cli_overrides(scenario_def.config.clone(), &overrides);
                 if !config.endpoints.is_empty() {
                     if let Some(client) = &pricing_client {
-                        match llm_browser_testkit::pricing::apply_auto_pricing(
+                        let outcome = llm_browser_testkit::pricing::apply_auto_pricing(
                             &mut config.endpoints,
                             client,
                         )
-                        .await
-                        {
-                            Ok(0) => {}
-                            Ok(n) => reporter
-                                .info(format!("pricing: filled exact prices for {n} endpoint(s)")),
-                            Err(e) => reporter.warn(format!("pricing lookup skipped: {e}")),
+                        .await;
+                        if outcome.priced > 0 {
+                            reporter.info(format!(
+                                "pricing: filled exact prices for {} endpoint(s)",
+                                outcome.priced
+                            ));
+                        }
+                        for name in &outcome.unsupported {
+                            reporter.warn(format!(
+                                "pricing: automatic lookup is on but the provider for \
+                                 endpoint `{name}` has no exact price source; disabled for it"
+                            ));
+                        }
+                        if let Some(e) = &outcome.error {
+                            reporter.warn(format!("pricing lookup skipped: {e}"));
                         }
                     }
                 }
@@ -665,7 +674,11 @@ async fn main() -> anyhow::Result<()> {
 
                 reporter.finish()?;
 
-                llm_browser_testkit::reporting::print_report(&run.per_test, &run.global);
+                llm_browser_testkit::reporting::print_batch_report(
+                    &run.per_file,
+                    &run.per_test,
+                    &run.global,
+                );
 
                 if run.report.failed > 0 {
                     std::process::exit(1);

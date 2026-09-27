@@ -167,6 +167,8 @@ pub struct ParallelRun {
     pub report: RunReport,
     /// Per-test usage snapshots across all files.
     pub per_test: Vec<(String, UsageSnapshot)>,
+    /// Per-file usage snapshots (file label → usage), in batch order.
+    pub per_file: Vec<(String, UsageSnapshot)>,
     /// Combined global usage across all files.
     pub global: UsageSnapshot,
 }
@@ -241,8 +243,9 @@ pub fn run_scenarios(files: Vec<ScenarioFile>, opts: RunOptions) -> Result<Paral
         let st = state.lock().unwrap();
         let mut report = RunReport::default();
         let mut per_test: Vec<(String, UsageSnapshot)> = Vec::new();
+        let mut per_file: Vec<(String, UsageSnapshot)> = Vec::new();
         let mut globals: Vec<UsageSnapshot> = Vec::new();
-        for r in &st.results {
+        for (i, r) in st.results.iter().enumerate() {
             if let Some(run) = r.as_ref() {
                 report.tests_passed += run.report.tests_passed;
                 report.tests_failed += run.report.tests_failed;
@@ -251,12 +254,16 @@ pub fn run_scenarios(files: Vec<ScenarioFile>, opts: RunOptions) -> Result<Paral
                 report.skipped += run.report.skipped;
                 report.details.extend(run.report.details.clone());
                 per_test.extend(run.per_test.clone());
+                if let Some(file) = st.files.get(i) {
+                    per_file.push((file.label.clone(), run.global.clone()));
+                }
                 globals.push(run.global.clone());
             }
         }
         ParallelRun {
             report,
             per_test,
+            per_file,
             global: merge_globals(&globals),
         }
     };
@@ -632,6 +639,7 @@ fn run_one_file(file: &ScenarioFile, reporter: &Arc<Reporter>) -> Result<Paralle
             Ok(ParallelRun {
                 report,
                 per_test: usage.per_test_snapshots(),
+                per_file: Vec::new(),
                 global: usage.global_snapshot(),
             })
         }
@@ -672,6 +680,7 @@ fn synthesized_failed_report(file: &ScenarioFile) -> ParallelRun {
             details: Vec::new(),
         },
         per_test: Vec::new(),
+        per_file: Vec::new(),
         global: UsageSnapshot::default(),
     }
 }
