@@ -1024,26 +1024,44 @@ cache_pricing = false               # bill every prompt token at the input price
 
 Pricing is **not** fetched automatically by default — it comes from the
 `pricing` block above. Where a provider exposes **exact**, machine-readable
-prices, you can opt in with `pricing_source`:
+prices, you can opt in with `pricing_source`; the lookup runs once at startup
+and fills only the pricing fields you left unset (explicit values win). A
+lookup failure is non-fatal: the run continues with the configured pricing.
 
 ```toml
-[config.endpoints.default]
+[config.endpoints.openrouter]
 model = "anthropic/claude-3.5-sonnet"
-pricing_source = "openrouter"   # or "auto" (only when the URL is openrouter.ai)
+pricing_source = "openrouter"   # or "auto" (openrouter.ai URLs)
+
+[config.endpoints.bedrock]
+provider = "bedrock"
+model = "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+pricing_source = "bedrock"      # or "auto" (any Bedrock endpoint)
+# region comes from [..aws].region, else AWS_REGION, else us-east-1
 ```
 
 `openrouter` fetches exact per-token `prompt`, `completion`, `input_cache_read`
-and `input_cache_write` prices from `GET https://openrouter.ai/api/v1/models`
-and fills only the pricing fields you left unset (explicit values win). A
-lookup failure is non-fatal: the run continues with the configured pricing.
+and `input_cache_write` prices from `GET https://openrouter.ai/api/v1/models`.
+
+`bedrock` fetches the AWS Price List at startup and merges two public offers
+for the endpoint's region — `AmazonBedrock` (Nova, Llama, Mistral, DeepSeek,
+…) and `AmazonBedrockFoundationModels` (Anthropic Claude, Cohere, …) — reading
+the exact input/output/**cache-read**/**cache-write** price for the configured
+model. Standard on-demand, in-region prices are used; `batch`, `flex`,
+`priority`, `global`, latency-optimized, provisioned-throughput and custom-model
+tiers are excluded. The model id is normalized (inference-profile and provider
+prefixes, dates and `:0` revisions are stripped) and matched to the catalog
+name, e.g. `us.anthropic.claude-3-5-sonnet-20241022-v2:0` →
+`Claude 3.5 Sonnet v2`.
 
 | Provider | Exact public price API? | Status in this library |
 | --- | --- | --- |
 | OpenRouter | Yes — `/api/v1/models` (no auth) | ✅ `pricing_source = "openrouter"` |
-| AWS Bedrock | Partly — Price List has per-model cache usage types, but names vary (`-input-tokens` vs `-input-token-count`, `-flex`/`-priority`/`-cross-region-global` tiers) and prices are per region/partition | ❌ not implemented (no reliable exact model→SKU mapping) |
-| Azure OpenAI | Partly — Retail Prices API is public but model→meter mapping is heuristic | ❌ not implemented |
+| AWS Bedrock | Yes — Price List `AmazonBedrock` + `AmazonBedrockFoundationModels` per region, incl. cache read/write | ✅ `pricing_source = "bedrock"` |
+| Azure OpenAI | Partly — public Retail Prices API, but model→meter mapping is heuristic | ❌ not implemented |
 | OpenAI, Groq, xAI, DeepSeek | No public price API | ❌ configure `pricing` manually |
-| Google Gemini / Vertex | Pricing page only; Cloud Billing Catalog needs a key and does not expose Gemini dev prices | ❌ configure `pricing` manually |
+| Google Gemini / Vertex | Pricing page only; Cloud Billing Catalog needs a key and lacks Gemini dev prices | ❌ configure `pricing` manually |
+
 
 
 ## Parallel runs
