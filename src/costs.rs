@@ -16,6 +16,8 @@ pub struct EndpointUsage {
     pub output_tokens: u64,
     /// Input tokens served from the provider's prompt cache.
     pub cached_input_tokens: u64,
+    /// Input tokens written to the provider's prompt cache (cache creation).
+    pub cache_creation_input_tokens: u64,
     /// Accumulated cost in USD.
     pub cost: f64,
     /// Model names observed on this endpoint, sorted and deduplicated.
@@ -45,6 +47,8 @@ pub struct UsageSnapshot {
     pub total_output_tokens: u64,
     /// Total input tokens served from provider prompt caches.
     pub total_cached_input_tokens: u64,
+    /// Total input tokens written to provider prompt caches.
+    pub total_cache_creation_input_tokens: u64,
     /// Model names observed across all endpoints, sorted and deduplicated.
     pub models: Vec<String>,
 }
@@ -59,6 +63,10 @@ impl UsageSnapshot {
         let total_input_tokens = endpoints.values().map(|u| u.input_tokens).sum();
         let total_output_tokens = endpoints.values().map(|u| u.output_tokens).sum();
         let total_cached_input_tokens = endpoints.values().map(|u| u.cached_input_tokens).sum();
+        let total_cache_creation_input_tokens = endpoints
+            .values()
+            .map(|u| u.cache_creation_input_tokens)
+            .sum();
         let models: Vec<String> = endpoints
             .values()
             .flat_map(|u| u.models.iter().cloned())
@@ -73,6 +81,7 @@ impl UsageSnapshot {
             total_input_tokens,
             total_output_tokens,
             total_cached_input_tokens,
+            total_cache_creation_input_tokens,
             models,
         }
     }
@@ -129,6 +138,7 @@ impl UsageTracker {
         eu.input_tokens += usage.prompt_tokens;
         eu.output_tokens += usage.completion_tokens;
         eu.cached_input_tokens += usage.cached_input_tokens;
+        eu.cache_creation_input_tokens += usage.cache_creation_input_tokens;
         eu.cost += cost;
         if !model.is_empty() {
             eu.models.insert(model.to_owned());
@@ -211,6 +221,7 @@ impl UsageTracker {
             ge.input_tokens += ep_usage.input_tokens;
             ge.output_tokens += ep_usage.output_tokens;
             ge.cached_input_tokens += ep_usage.cached_input_tokens;
+            ge.cache_creation_input_tokens += ep_usage.cache_creation_input_tokens;
             ge.cost += ep_usage.cost;
             ge.models.extend(ep_usage.models.iter().cloned());
         }
@@ -220,6 +231,8 @@ impl UsageTracker {
         inner.global.total_input_tokens += snapshot.total_input_tokens;
         inner.global.total_output_tokens += snapshot.total_output_tokens;
         inner.global.total_cached_input_tokens += snapshot.total_cached_input_tokens;
+        inner.global.total_cache_creation_input_tokens +=
+            snapshot.total_cache_creation_input_tokens;
         inner.global.models = inner
             .global
             .endpoints
@@ -262,6 +275,8 @@ pub struct LlmUsage {
     pub total_tokens: u64,
     /// Input tokens served from the provider's prompt cache (cache hit).
     pub cached_input_tokens: u64,
+    /// Input tokens written to the provider's prompt cache (cache creation).
+    pub cache_creation_input_tokens: u64,
 }
 
 /// Result of an LLM chat call including usage data.
@@ -278,8 +293,15 @@ pub struct LlmResponse {
 /// Cached prompt tokens are read from the `OpenAI`/`OpenRouter`
 /// `usage.prompt_tokens_details.cached_tokens` field, falling back to the
 /// `Anthropic`-compatible `usage.cache_read_input_tokens` and `DeepSeek`
-/// `usage.prompt_cache_hit_tokens` spellings. Providers that do not report
-/// prompt caching yield `0`.
+/// `usage.prompt_cache_hit_tokens` spellings. Cache-creation (write) tokens
+/// are read from the `Anthropic`-compatible
+/// `usage.cache_creation_input_tokens`. Providers that do not report prompt
+/// caching yield `0`.
+///
+/// Note the provider semantics differ: for `OpenAI`-compatible responses
+/// `cached_tokens` is a subset of `prompt_tokens`, whereas for
+/// `Anthropic`/Bedrock-style responses the cache counters are reported in
+/// addition to `inputTokens`.
 #[must_use]
 pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
     let usage = &value["usage"];
@@ -292,6 +314,7 @@ pub fn extract_usage(value: &serde_json::Value) -> LlmUsage {
             .or_else(|| usage["cache_read_input_tokens"].as_u64())
             .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
             .unwrap_or(0),
+        cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
     }
 }
 
@@ -337,6 +360,7 @@ mod tests {
             completion_tokens: completion,
             total_tokens: prompt + completion,
             cached_input_tokens: cached,
+            cache_creation_input_tokens: 0,
         }
     }
 

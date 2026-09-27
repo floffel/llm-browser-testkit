@@ -235,6 +235,7 @@ impl Redactor {
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
+                cache_creation_input_tokens,
                 cost,
                 error,
             } => TestEvent::LlmCallFinished {
@@ -248,6 +249,7 @@ impl Redactor {
                 input_tokens: *input_tokens,
                 output_tokens: *output_tokens,
                 cached_input_tokens: *cached_input_tokens,
+                cache_creation_input_tokens: *cache_creation_input_tokens,
                 cost: *cost,
                 error: error.as_deref().map(|s| self.redact(s)),
             },
@@ -262,6 +264,7 @@ impl Redactor {
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
+                cache_creation_input_tokens,
                 models,
                 calls,
             } => TestEvent::TestFinished {
@@ -275,6 +278,7 @@ impl Redactor {
                 input_tokens: *input_tokens,
                 output_tokens: *output_tokens,
                 cached_input_tokens: *cached_input_tokens,
+                cache_creation_input_tokens: *cache_creation_input_tokens,
                 models: models.iter().map(|m| self.redact(m)).collect(),
                 calls: *calls,
             },
@@ -289,6 +293,7 @@ impl Redactor {
                 total_input_tokens,
                 total_output_tokens,
                 total_cached_input_tokens,
+                total_cache_creation_input_tokens,
                 models,
                 total_calls,
             } => TestEvent::RunFinished {
@@ -302,6 +307,7 @@ impl Redactor {
                 total_input_tokens: *total_input_tokens,
                 total_output_tokens: *total_output_tokens,
                 total_cached_input_tokens: *total_cached_input_tokens,
+                total_cache_creation_input_tokens: *total_cache_creation_input_tokens,
                 models: models.iter().map(|m| self.redact(m)).collect(),
                 total_calls: *total_calls,
             },
@@ -572,6 +578,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             cost: 0.0,
             error: Some("HTTP 401: Bearer sk-static-key invalid (got runtime-token-987654)".into()),
         };
@@ -599,6 +606,7 @@ mod tests {
             input_tokens: 30,
             output_tokens: 12,
             cached_input_tokens: 5,
+            cache_creation_input_tokens: 3,
             models: vec!["deepseek".into()],
             calls: 1,
         };

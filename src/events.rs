@@ -107,6 +107,8 @@ pub enum TestEvent {
         output_tokens: u64,
         /// Input tokens served from the provider's prompt cache.
         cached_input_tokens: u64,
+        /// Input tokens written to the provider's prompt cache.
+        cache_creation_input_tokens: u64,
         /// Computed cost in USD.
         cost: f64,
         /// Error message when `ok` is false.
@@ -134,6 +136,8 @@ pub enum TestEvent {
         output_tokens: u64,
         /// Input tokens served from provider prompt caches.
         cached_input_tokens: u64,
+        /// Input tokens written to provider prompt caches.
+        cache_creation_input_tokens: u64,
         /// Models used by the test, sorted and deduplicated.
         models: Vec<String>,
         /// Total LLM/MCP/agent calls made by the test.
@@ -161,6 +165,8 @@ pub enum TestEvent {
         total_output_tokens: u64,
         /// Total input tokens served from provider prompt caches.
         total_cached_input_tokens: u64,
+        /// Total input tokens written to provider prompt caches.
+        total_cache_creation_input_tokens: u64,
         /// Models used across the run, sorted and deduplicated.
         models: Vec<String>,
         /// Total calls made.
@@ -237,6 +243,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 0,
             cached_input_tokens: 40,
+            cache_creation_input_tokens: 7,
             cost: 0.0012,
             error: Some("HTTP 429: slow down".into()),
         })
@@ -247,6 +254,7 @@ mod tests {
         assert_eq!(value["purpose"], "targeting");
         assert_eq!(value["ok"], false);
         assert_eq!(value["cached_input_tokens"], 40);
+        assert_eq!(value["cache_creation_input_tokens"], 7);
         assert_eq!(value["cost"], 0.0012);
         assert_eq!(value["error"], "HTTP 429: slow down");
     }
@@ -264,6 +272,7 @@ mod tests {
             total_input_tokens: 4000,
             total_output_tokens: 1000,
             total_cached_input_tokens: 500,
+            total_cache_creation_input_tokens: 250,
             models: vec!["deepseek".into()],
             total_calls: 7,
         })
@@ -274,6 +283,7 @@ mod tests {
         assert_eq!(value["total_cost"], 0.05);
         assert_eq!(value["total_input_tokens"], 4000);
         assert_eq!(value["total_cached_input_tokens"], 500);
+        assert_eq!(value["total_cache_creation_input_tokens"], 250);
         assert_eq!(value["models"][0], "deepseek");
     }
 

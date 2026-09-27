@@ -199,6 +199,7 @@ pub fn run_scenarios(files: Vec<ScenarioFile>, opts: RunOptions) -> Result<Paral
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cached_input_tokens: 0,
+            total_cache_creation_input_tokens: 0,
             models: Vec::new(),
             total_calls: 0,
         })?;
@@ -271,6 +272,7 @@ pub fn run_scenarios(files: Vec<ScenarioFile>, opts: RunOptions) -> Result<Paral
         total_input_tokens: run.global.total_input_tokens,
         total_output_tokens: run.global.total_output_tokens,
         total_cached_input_tokens: run.global.total_cached_input_tokens,
+        total_cache_creation_input_tokens: run.global.total_cache_creation_input_tokens,
         models: run.global.models.clone(),
         total_calls: run.global.total_calls,
     })?;
@@ -686,6 +688,7 @@ fn merge_globals(snapshots: &[UsageSnapshot]) -> UsageSnapshot {
             acc.input_tokens += usage.input_tokens;
             acc.output_tokens += usage.output_tokens;
             acc.cached_input_tokens += usage.cached_input_tokens;
+            acc.cache_creation_input_tokens += usage.cache_creation_input_tokens;
             acc.cost += usage.cost;
             acc.models.extend(usage.models.iter().cloned());
         }
@@ -1048,6 +1051,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 50,
                 cached_input_tokens: 20,
+                cache_creation_input_tokens: 5,
                 cost: 0.01,
                 models: std::iter::once("m1".to_owned()).collect(),
             },
@@ -1059,6 +1063,7 @@ mod tests {
                 input_tokens: 200,
                 output_tokens: 100,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 cost: 0.02,
                 models: std::iter::once("m1".to_owned()).collect(),
             },
@@ -1070,6 +1075,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 cost: 0.001,
                 models: std::iter::once("m2".to_owned()).collect(),
             },
@@ -1080,6 +1086,7 @@ mod tests {
         assert_eq!(a.calls, 3);
         assert_eq!(a.input_tokens, 300);
         assert_eq!(a.cached_input_tokens, 20);
+        assert_eq!(a.cache_creation_input_tokens, 5);
         assert!((a.cost - 0.03).abs() < 0.0001);
         let b = merged.endpoints.get("b").unwrap();
         assert_eq!(b.calls, 1);

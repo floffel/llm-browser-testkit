@@ -143,6 +143,7 @@ struct RunSummary {
     total_input_tokens: u64,
     total_output_tokens: u64,
     total_cached_input_tokens: u64,
+    total_cache_creation_input_tokens: u64,
     models: Vec<String>,
     total_calls: u64,
 }
@@ -522,6 +523,7 @@ impl Reporter {
                 total_input_tokens,
                 total_output_tokens,
                 total_cached_input_tokens,
+                total_cache_creation_input_tokens,
                 models,
                 total_calls,
             } => {
@@ -536,6 +538,7 @@ impl Reporter {
                     total_input_tokens: *total_input_tokens,
                     total_output_tokens: *total_output_tokens,
                     total_cached_input_tokens: *total_cached_input_tokens,
+                    total_cache_creation_input_tokens: *total_cache_creation_input_tokens,
                     models: models.clone(),
                     total_calls: *total_calls,
                 });
@@ -574,12 +577,13 @@ impl Reporter {
         );
         let _ = writeln!(
             file,
-            "- cost: ${:.4} | tokens: {} ({} in / {} out, {} cached) | calls: {}",
+            "- cost: ${:.4} | tokens: {} ({} in / {} out, {} cached, {} cache write) | calls: {}",
             summary.total_cost,
             summary.total_tokens,
             summary.total_input_tokens,
             summary.total_output_tokens,
             summary.total_cached_input_tokens,
+            summary.total_cache_creation_input_tokens,
             summary.total_calls
         );
         if !summary.models.is_empty() {
@@ -692,6 +696,7 @@ fn format_event(event: &TestEvent, palette: Palette) -> (Level, String) {
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            cache_creation_input_tokens,
             cost,
             error,
             ..
@@ -704,7 +709,9 @@ fn format_event(event: &TestEvent, palette: Palette) -> (Level, String) {
             let dur = palette.dim(&format_duration(*duration_ms));
             let mut line = format!(
                 "      llm({purpose}): {endpoint} ({model}) {status} {dur} | \
-                 {input_tokens} in / {output_tokens} out ({cached_input_tokens} cached) | ${cost:.4}"
+                 {input_tokens} in / {output_tokens} out \
+                 ({cached_input_tokens} cached, {cache_creation_input_tokens} cache write) | \
+                 ${cost:.4}"
             );
             if let Some(err) = error {
                 use std::fmt::Write as _;
@@ -724,6 +731,7 @@ fn format_event(event: &TestEvent, palette: Palette) -> (Level, String) {
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            cache_creation_input_tokens,
             models,
             calls,
         } => {
@@ -735,7 +743,8 @@ fn format_event(event: &TestEvent, palette: Palette) -> (Level, String) {
             let dur = palette.dim(&format_duration(*duration_ms));
             let mut line = format!(
                 "Test: {test} — {verdict} ({dur}, ${cost:.4}, {tokens} tokens \
-                 ({input_tokens} in / {output_tokens} out, {cached_input_tokens} cached), \
+                 ({input_tokens} in / {output_tokens} out, {cached_input_tokens} cached, \
+                 {cache_creation_input_tokens} cache write), \
                  {calls} calls, {passed}+{failed}+{skipped} steps)"
             );
             if !models.is_empty() {
@@ -755,6 +764,7 @@ fn format_event(event: &TestEvent, palette: Palette) -> (Level, String) {
             total_input_tokens,
             total_output_tokens,
             total_cached_input_tokens,
+            total_cache_creation_input_tokens,
             models,
             total_calls,
         } => {
@@ -768,7 +778,8 @@ fn format_event(event: &TestEvent, palette: Palette) -> (Level, String) {
                  steps {steps_passed} passed, {steps_failed} failed, \
                  {steps_skipped} skipped | ${total_cost:.4} | {total_tokens} tokens \
                  ({total_input_tokens} in / {total_output_tokens} out, \
-                 {total_cached_input_tokens} cached) | {total_calls} calls"
+                 {total_cached_input_tokens} cached, {total_cache_creation_input_tokens} cache write) \
+                 | {total_calls} calls"
             );
             if !models.is_empty() {
                 use std::fmt::Write as _;
@@ -887,12 +898,13 @@ pub fn print_report(per_test: &[(String, UsageSnapshot)], global: &UsageSnapshot
     for (test_name, snapshot) in per_test {
         eprintln!(
             "  Test: \"{test_name}\" — ${cost:.4} | {tokens} tokens \
-             ({input} in / {output} out, {cached} cached) | {calls} calls",
+             ({input} in / {output} out, {cached} cached, {write} cache write) | {calls} calls",
             cost = snapshot.total_cost,
             tokens = snapshot.total_tokens,
             input = snapshot.total_input_tokens,
             output = snapshot.total_output_tokens,
             cached = snapshot.total_cached_input_tokens,
+            write = snapshot.total_cache_creation_input_tokens,
             calls = snapshot.total_calls,
         );
         if !snapshot.models.is_empty() {
@@ -904,11 +916,12 @@ pub fn print_report(per_test: &[(String, UsageSnapshot)], global: &UsageSnapshot
             }
             eprintln!(
                 "    endpoint.{ep_name}:   {calls:>3} calls, {input:>7} in / {output:>7} out \
-                 ({cached} cached), {tokens:>7} tokens, ${cost:.4}",
+                 ({cached} cached, {write} cache write), {tokens:>7} tokens, ${cost:.4}",
                 calls = ep_usage.calls,
                 input = ep_usage.input_tokens,
                 output = ep_usage.output_tokens,
                 cached = ep_usage.cached_input_tokens,
+                write = ep_usage.cache_creation_input_tokens,
                 tokens = ep_usage.input_tokens + ep_usage.output_tokens,
                 cost = ep_usage.cost,
             );
@@ -947,6 +960,10 @@ pub fn print_report(per_test: &[(String, UsageSnapshot)], global: &UsageSnapshot
     eprintln!(
         "    Total cached input: {cached}",
         cached = global.total_cached_input_tokens
+    );
+    eprintln!(
+        "    Total cache write:  {write}",
+        write = global.total_cache_creation_input_tokens
     );
     eprintln!(
         "    Total calls:        {calls}",
@@ -1066,6 +1083,7 @@ mod tests {
                 input_tokens: 800,
                 output_tokens: 434,
                 cached_input_tokens: 200,
+                cache_creation_input_tokens: 50,
                 models: vec!["deepseek".into()],
                 calls: 4,
             },
@@ -1074,6 +1092,7 @@ mod tests {
         assert_eq!(ok.0, Level::Info);
         assert!(ok.1.contains("passed"));
         assert!(ok.1.contains("800 in / 434 out"));
+        assert!(ok.1.contains("50 cache write"));
         assert!(ok.1.contains("models: deepseek"));
 
         let bad = format_event(
@@ -1088,6 +1107,7 @@ mod tests {
                 input_tokens: 800,
                 output_tokens: 434,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 models: Vec::new(),
                 calls: 4,
             },
@@ -1123,6 +1143,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 0,
                 cached_input_tokens: 30,
+                cache_creation_input_tokens: 12,
                 cost: 0.0012,
                 error: Some("HTTP 429: slow down".into()),
             },
@@ -1131,6 +1152,7 @@ mod tests {
         assert_eq!(failed.0, Level::Warn);
         assert!(failed.1.contains("failed"));
         assert!(failed.1.contains("30 cached"));
+        assert!(failed.1.contains("12 cache write"));
         assert!(failed.1.contains("HTTP 429"));
     }
 
@@ -1192,6 +1214,7 @@ mod tests {
                 input_tokens: 70,
                 output_tokens: 30,
                 cached_input_tokens: 10,
+                cache_creation_input_tokens: 4,
                 models: vec!["deepseek".into()],
                 calls: 1,
             })
@@ -1208,6 +1231,7 @@ mod tests {
                 total_input_tokens: 70,
                 total_output_tokens: 30,
                 total_cached_input_tokens: 10,
+                total_cache_creation_input_tokens: 4,
                 models: vec!["deepseek".into()],
                 total_calls: 1,
             })
@@ -1259,6 +1283,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 models: Vec::new(),
                 calls: 0,
             })
@@ -1297,6 +1322,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 models: Vec::new(),
                 calls: 0,
             })
@@ -1348,6 +1374,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 models: Vec::new(),
                 calls: 0,
             })
@@ -1391,6 +1418,7 @@ mod tests {
                 input_tokens: tokens / 2,
                 output_tokens: tokens / 2,
                 cached_input_tokens: tokens / 4,
+                cache_creation_input_tokens: tokens / 8,
                 cost,
                 models: std::iter::once("deepseek".to_owned()).collect(),
             },

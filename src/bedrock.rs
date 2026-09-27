@@ -12,7 +12,8 @@
 //! - system prompt → top-level `system` block
 //! - user message → `content` blocks (`text`, plus `image` for vision)
 //! - `temperature` / `maxTokens` → `inferenceConfig`
-//! - usage → `inputTokens` / `outputTokens`
+//! - usage → `inputTokens` / `outputTokens`, plus `cacheReadInputTokens` /
+//!   `cacheWriteInputTokens` when the model reports prompt-cache activity
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -398,6 +399,7 @@ fn parse_response(json: &serde_json::Value) -> Result<LlmResponse, String> {
             completion_tokens: usage["outputTokens"].as_u64().unwrap_or(0),
             total_tokens: usage["totalTokens"].as_u64().unwrap_or(0),
             cached_input_tokens: usage["cacheReadInputTokens"].as_u64().unwrap_or(0),
+            cache_creation_input_tokens: usage["cacheWriteInputTokens"].as_u64().unwrap_or(0),
         },
     })
 }
@@ -528,7 +530,13 @@ mod tests {
             "output": {"message": {"role": "assistant", "content": [
                 {"text": "PASS"},
             ]}},
-            "usage": {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13},
+            "usage": {
+                "inputTokens": 10,
+                "outputTokens": 3,
+                "totalTokens": 13,
+                "cacheReadInputTokens": 4,
+                "cacheWriteInputTokens": 2
+            },
             "stopReason": "end_turn"
         });
         let resp: LlmResponse = parse_response(&json).expect("parses");
@@ -536,6 +544,8 @@ mod tests {
         assert_eq!(resp.usage.prompt_tokens, 10);
         assert_eq!(resp.usage.completion_tokens, 3);
         assert_eq!(resp.usage.total_tokens, 13);
+        assert_eq!(resp.usage.cached_input_tokens, 4);
+        assert_eq!(resp.usage.cache_creation_input_tokens, 2);
     }
 
     #[test]

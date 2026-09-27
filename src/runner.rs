@@ -532,6 +532,7 @@ impl ScenarioRunner {
                     total_input_tokens: 0,
                     total_output_tokens: 0,
                     total_cached_input_tokens: 0,
+                    total_cache_creation_input_tokens: 0,
                     models: Vec::new(),
                     total_calls: 0,
                 });
@@ -625,6 +626,7 @@ impl ScenarioRunner {
                 input_tokens: usage.total_input_tokens,
                 output_tokens: usage.total_output_tokens,
                 cached_input_tokens: usage.total_cached_input_tokens,
+                cache_creation_input_tokens: usage.total_cache_creation_input_tokens,
                 models: usage.models.clone(),
                 calls: usage.total_calls,
             });
@@ -654,6 +656,7 @@ impl ScenarioRunner {
                 total_input_tokens: global.total_input_tokens,
                 total_output_tokens: global.total_output_tokens,
                 total_cached_input_tokens: global.total_cached_input_tokens,
+                total_cache_creation_input_tokens: global.total_cache_creation_input_tokens,
                 models: global.models.clone(),
                 total_calls: global.total_calls,
             });
@@ -2074,6 +2077,7 @@ impl ScenarioRunner {
                     input_tokens: lr.usage.prompt_tokens,
                     output_tokens: lr.usage.completion_tokens,
                     cached_input_tokens: lr.usage.cached_input_tokens,
+                    cache_creation_input_tokens: lr.usage.cache_creation_input_tokens,
                     cost,
                     error: None,
                 });
@@ -2091,6 +2095,7 @@ impl ScenarioRunner {
                     input_tokens: 0,
                     output_tokens: 0,
                     cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                     cost: 0.0,
                     error: Some(e.clone()),
                 });

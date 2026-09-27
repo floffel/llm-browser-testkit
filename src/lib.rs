@@ -946,13 +946,32 @@ mod tests {
             "usage": {
                 "prompt_tokens": 100,
                 "completion_tokens": 200,
-                "total_tokens": 300
+                "total_tokens": 300,
+                "prompt_tokens_details": { "cached_tokens": 40 }
             }
         });
         let usage = extract_usage(&json);
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 200);
         assert_eq!(usage.total_tokens, 300);
+        assert_eq!(usage.cached_input_tokens, 40);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_extract_usage_anthropic_cache_fields() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 12
+            }
+        });
+        let usage = extract_usage(&json);
+        assert_eq!(usage.cached_input_tokens, 30);
+        assert_eq!(usage.cache_creation_input_tokens, 12);
     }
 
     #[test]
