@@ -381,6 +381,29 @@ const ASSERTION_PRESETS: &[AssertPreset] = &[
     },
 ];
 
+/// Whether an LLM verdict should be read as PASS.
+///
+/// Models routinely wrap the verdict in markdown (`**PASS** …`) or prefix it
+/// with punctuation, which a bare `starts_with("pass")` misreads as a failure.
+/// Strip any leading non-alphanumerics, then match the leading word; this also
+/// accepts the natural-language forms `pass` / `passes`.
+fn verdict_is_pass(content: &str) -> bool {
+    content
+        .trim()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+        .starts_with("pass")
+}
+
+/// Whether an LLM verdict should be read as FAIL (see [`verdict_is_pass`]).
+fn verdict_is_fail(content: &str) -> bool {
+    content
+        .trim()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+        .starts_with("fail")
+}
+
 impl ScenarioRunner {
     /// Creates a new runner with the given scenario configuration and
     /// assertion definitions.
@@ -1502,8 +1525,7 @@ impl ScenarioRunner {
                 message: format!("LLM assertion call failed: {e}"),
             },
             |(lr, _idx)| {
-                let content_lower = lr.content.to_lowercase().trim().to_owned();
-                if content_lower.starts_with("pass") {
+                if verdict_is_pass(&lr.content) {
                     StepResult {
                         name: format!("[assert] {name}"),
                         status: StepStatus::Passed,
@@ -1583,8 +1605,7 @@ impl ScenarioRunner {
                 message: format!("LLM assertion call failed: {e}"),
             },
             |(lr, _idx)| {
-                let content_lower = lr.content.to_lowercase().trim().to_owned();
-                if content_lower.starts_with("pass") {
+                if verdict_is_pass(&lr.content) {
                     StepResult {
                         name: format!("[assert] {preset_name}"),
                         status: StepStatus::Passed,
@@ -1705,8 +1726,7 @@ impl ScenarioRunner {
                 message: format!("LLM assertion call failed: {e}"),
             },
             |(lr, _idx)| {
-                let content_lower = lr.content.to_lowercase().trim().to_owned();
-                if content_lower.starts_with("pass") {
+                if verdict_is_pass(&lr.content) {
                     StepResult {
                         name: "[assert] custom".into(),
                         status: StepStatus::Passed,
@@ -1821,14 +1841,13 @@ impl ScenarioRunner {
         match response {
             Ok(text) => {
                 let clean = text.trim().to_owned();
-                let lower = clean.to_lowercase();
-                if lower.starts_with("pass") {
+                if verdict_is_pass(&clean) {
                     StepResult {
                         name: format!("[agent] {display_name}"),
                         status: StepStatus::Passed,
                         message: format!("PASS: {clean}"),
                     }
-                } else if lower.starts_with("fail") {
+                } else if verdict_is_fail(&clean) {
                     StepResult {
                         name: format!("[agent] {display_name}"),
                         status: StepStatus::Failed,
@@ -2405,5 +2424,25 @@ mod tests {
     fn rfc3339_handles_leap_years() {
         assert_eq!(unix_to_rfc3339(1_582_905_600), "2020-02-28T16:00:00Z");
         assert_eq!(unix_to_rfc3339(1_707_408_000), "2024-02-08T16:00:00Z");
+    }
+}
+
+#[cfg(test)]
+mod verdict_parse_tests {
+    use super::{verdict_is_fail, verdict_is_pass};
+
+    #[test]
+    fn tolerates_markdown_punctuation_and_natural_language() {
+        assert!(verdict_is_pass("PASS"));
+        assert!(verdict_is_pass("pass"));
+        assert!(verdict_is_pass("**PASS**\n\nThe page is clean."));
+        assert!(verdict_is_pass("passes - no explicit error visible"));
+        assert!(verdict_is_pass("  \"pass\""));
+        assert!(!verdict_is_pass("FAIL: something broke"));
+        assert!(!verdict_is_pass("**FAIL** broken"));
+
+        assert!(verdict_is_fail("**FAIL** broken"));
+        assert!(verdict_is_fail("fails - error toast shown"));
+        assert!(!verdict_is_fail("passes - ok"));
     }
 }
