@@ -14,9 +14,9 @@ use headless_chrome::{protocol::cdp::Page::CaptureScreenshotFormatOption, Tab};
 use crate::truncate;
 
 /// Maximum length of visible text kept in the in-message excerpt.
-const EXCERPT_LEN: usize = 160;
+const EXCERPT_LEN: usize = 400;
 /// Maximum length of visible text kept for the printed diagnostics block.
-const FULL_TEXT_LEN: usize = 1500;
+const FULL_TEXT_LEN: usize = 4000;
 
 /// JavaScript that collects visible "alert-like" elements — error banners,
 /// toast/snackbars, validation messages, error cards.
