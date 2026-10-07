@@ -368,8 +368,8 @@ How it works:
   so the visible viewport is always fully included (`0` / `"0x"` = exactly
   the viewport, the pre-full-page behavior).
 - Built-in presets: `visual_no_issues`, `visual_no_overlaps`,
-  `visual_text_visible` (uses `assert_text`). Custom `screenshot = true`
-  prompts work too.
+  `visual_fills_viewport`, `visual_text_visible` (uses `assert_text`). Custom
+  `screenshot = true` prompts work too.
 - A `screenshot = true` step that resolves to an endpoint without
   `vision = true` fails immediately with a clear configuration error.
 - Text-only workflows are untouched: without `screenshot = true` the
@@ -474,6 +474,7 @@ Built-in presets you can use inline or from `[[definitions]]`.
 | `layout_no_issues` | **DOM scan, no LLM**: page overflow, elements out of viewport, clipped text, covered controls |
 | `visual_no_issues` | **Screenshot**: no layout/rendering defects (overlaps, clipping, cut-off content, broken images, blank panels) |
 | `visual_no_overlaps` | **Screenshot**: no elements covering other content or intercepting clicks |
+| `visual_fills_viewport` | **Screenshot**: content fills the viewport — flags pages that visibly stop partway down or across (ignores intentionally short pages) |
 | `visual_text_visible` | **Screenshot**: `assert_text` is fully visible and readable (not clipped or covered) |
 
 Custom assertions with `prompt` send any question to the LLM:
