@@ -1114,7 +1114,7 @@ mod tests {
     fn test_llm_config_has_default_model() {
         let _env = env_guard();
         let config = LlmConfig::from_env();
-        assert!(!config.model.is_empty());
+        assert_ne!(config.model, "");
     }
 
     #[test]

@@ -551,6 +551,6 @@ mod tests {
         let ep = ResolvedEndpoint::default_llm();
         assert_eq!(ep.endpoint_type, EndpointType::Llm);
         assert!(ep.model.is_some());
-        assert!(!ep.url.is_empty());
+        assert_ne!(ep.url, "");
     }
 }
