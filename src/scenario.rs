@@ -90,6 +90,12 @@ pub struct ScenarioConfig {
     /// Run browser in headless mode.
     #[serde(default)]
     pub browser_headless: Option<bool>,
+    /// HTTP Basic Auth username for browser navigation.
+    #[serde(default)]
+    pub browser_basic_auth_user: Option<String>,
+    /// HTTP Basic Auth password for browser navigation.
+    #[serde(default)]
+    pub browser_basic_auth_password: Option<String>,
     /// HTTP / browser action timeout in seconds.
     #[serde(default)]
     pub timeout_secs: Option<u64>,

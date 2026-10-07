@@ -518,6 +518,8 @@ llm-browser-testkit run <scenario.toml> [<scenario2.toml> ...] [OPTIONS]
 | `--redact` | `$HARNESS_REDACT` (comma-separated) | Literal value redacted from all rows/sinks (repeatable) |
 | `--model-param` | — | Provider param `key=value` (repeatable) |
 | `--base-url` | `$HARNESS_BROWSER_BASE_URL` or `http://localhost:4200` | App under test |
+| `--browser-basic-auth-user` | `$HARNESS_BROWSER_BASIC_AUTH_USER` | Browser HTTP Basic Auth username |
+| `--browser-basic-auth-password` | `$HARNESS_BROWSER_BASIC_AUTH_PASSWORD` | Browser HTTP Basic Auth password |
 | `--headless` | `true` | Run Chrome headlessly |
 | `--timeout` | `60` | Seconds per action |
 | `--viewport-width` | `1280` | Browser width |

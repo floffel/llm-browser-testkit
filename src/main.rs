@@ -116,6 +116,16 @@ enum Command {
         #[arg(long, default_value = "true")]
         headless: bool,
 
+        /// HTTP Basic Auth username for browser navigation
+        /// (default: `HARNESS_BROWSER_BASIC_AUTH_USER`).
+        #[arg(long, env = "HARNESS_BROWSER_BASIC_AUTH_USER")]
+        browser_basic_auth_user: Option<String>,
+
+        /// HTTP Basic Auth password for browser navigation
+        /// (default: `HARNESS_BROWSER_BASIC_AUTH_PASSWORD`).
+        #[arg(long, env = "HARNESS_BROWSER_BASIC_AUTH_PASSWORD")]
+        browser_basic_auth_password: Option<String>,
+
         /// HTTP / browser action timeout in seconds (default: 60).
         #[arg(long, default_value = "60")]
         timeout: u64,
@@ -232,6 +242,8 @@ struct RunOverrides {
     llm_headers: Vec<(String, String)>,
     model_params: Vec<(String, Value)>,
     headless: bool,
+    browser_basic_auth_user: Option<String>,
+    browser_basic_auth_password: Option<String>,
     timeout: u64,
     viewport_width: u32,
     viewport_height: u32,
@@ -247,6 +259,7 @@ struct RunOverrides {
 /// Builds a scenario's effective global config by applying CLI overrides on
 /// top of the scenario `[config]`. CLI flags win; per-scenario values keep
 /// their precedence for anything the CLI did not set.
+#[allow(clippy::too_many_lines)]
 fn apply_cli_overrides(config: ScenarioConfig, o: &RunOverrides) -> ScenarioConfig {
     let mut config = config;
     config.base_url = o.base_url.clone().or(config.base_url);
@@ -303,6 +316,14 @@ fn apply_cli_overrides(config: ScenarioConfig, o: &RunOverrides) -> ScenarioConf
         config.model_params = params;
     }
     config.browser_headless = Some(o.headless);
+    config.browser_basic_auth_user = o
+        .browser_basic_auth_user
+        .clone()
+        .or(config.browser_basic_auth_user);
+    config.browser_basic_auth_password = o
+        .browser_basic_auth_password
+        .clone()
+        .or(config.browser_basic_auth_password);
     config.timeout_secs = Some(o.timeout.max(config.timeout_secs.unwrap_or(60)));
     config.viewport_width = Some(o.viewport_width.max(config.viewport_width.unwrap_or(1280)));
     config.viewport_height = Some(o.viewport_height.max(config.viewport_height.unwrap_or(720)));
@@ -501,6 +522,8 @@ async fn main() -> anyhow::Result<()> {
             redact,
             model_params,
             headless,
+            browser_basic_auth_user,
+            browser_basic_auth_password,
             timeout,
             viewport_width,
             viewport_height,
@@ -548,6 +571,8 @@ async fn main() -> anyhow::Result<()> {
                 llm_headers,
                 model_params,
                 headless,
+                browser_basic_auth_user,
+                browser_basic_auth_password,
                 timeout,
                 viewport_width,
                 viewport_height,

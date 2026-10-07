@@ -597,6 +597,19 @@ impl ScenarioRunner {
 
         let browser = Browser::new(launch_opts).context("failed to launch browser")?;
         let tab = browser.new_tab().context("failed to open browser tab")?;
+        match (
+            self.config.browser_basic_auth_user.clone(),
+            self.config.browser_basic_auth_password.clone(),
+        ) {
+            (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
+                tab.authenticate(Some(username), Some(password))
+                    .context("failed to configure browser HTTP Basic Auth")?;
+                tab.enable_fetch(None, Some(true))
+                    .context("failed to enable browser HTTP authentication")?;
+            }
+            (None, None) => {}
+            _ => anyhow::bail!("browser Basic Auth requires both username and password"),
+        }
         let _ = tab.set_default_timeout(self.timeout);
 
         // Start MCP server if configured
