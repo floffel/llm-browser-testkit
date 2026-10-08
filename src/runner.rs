@@ -742,6 +742,34 @@ impl ScenarioRunner {
             .or_else(|| self.config.start_url.clone())
             .unwrap_or_else(|| "/dashboard".to_owned());
 
+        // Per-test state isolation for LOGIN tests: the tab is shared
+        // across the file's tests, and a previous test's login persists
+        // (Cognito tokens in localStorage + the hosted-UI cookies). The
+        // SPA's login pages then auto-continue authenticated visitors on
+        // boot, so a later login test never sees the form and times out
+        // waiting for `#email` (observed on runs #1641/#1642: a shard's
+        // first three logins pass, the fourth onward time out). Tests
+        // that navigate a login route start with cleared cookies + origin
+        // storage; every other test keeps the shared session (most
+        // "page loads" tests rely on it). The HTTP cache is deliberately
+        // NOT cleared — re-downloading the SPA bundle per test would only
+        // add boot time.
+        if auto_navigate && test_targets_login(&start_url, &test.steps) {
+            use headless_chrome::protocol::cdp::{Network, Storage};
+            if let Err(e) = tab.call_method(Network::ClearBrowserCookies(None)) {
+                self.reporter
+                    .warn(format!("per-test cookie clear failed: {e}"));
+            }
+            if let Some(origin) = origin_of(&base_url) {
+                if let Err(e) = tab.call_method(Storage::ClearDataForOrigin {
+                    origin,
+                    storage_Types: "all".to_string(),
+                }) {
+                    self.reporter
+                        .warn(format!("per-test storage clear failed: {e}"));
+                }
+            }
+        }
         if auto_navigate {
             let full_url = resolve_url(&start_url, &base_url);
             self.reporter.debug(format!("auto-navigate: {full_url}"));
@@ -2359,6 +2387,42 @@ fn resolve_url(url: &str, base_url: &str) -> String {
     } else {
         format!("{base}/{url}")
     }
+}
+
+/// Origin (`scheme://host[:port]`) of a base URL, used to scope the
+/// per-test `Storage.clearDataForOrigin` call. Returns `None` when the
+/// URL has no recognizable scheme/host (the clear is skipped).
+#[must_use]
+fn origin_of(base_url: &str) -> Option<String> {
+    let url = if base_url.contains("://") {
+        base_url.to_owned()
+    } else {
+        format!("https://{base_url}")
+    };
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|a| !a.is_empty())?;
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// True when a test performs its own login: its `start_url` or its first
+/// navigate step targets a login route (org `/auth/login`, tenant
+/// `/tenant/login`). Such tests need a cleared session — with a live one
+/// the SPA bounces the login page before the form ever mounts.
+#[must_use]
+fn test_targets_login(start_url: &str, steps: &[TestStep]) -> bool {
+    if start_url.contains("login") {
+        return true;
+    }
+    steps
+        .iter()
+        .find_map(|s| match s {
+            TestStep::Navigate { url, .. } => Some(url.clone()),
+            _ => None,
+        })
+        .is_some_and(|u| u.contains("login"))
 }
 
 /// Human-readable label for a step, used when steps are skipped after an
