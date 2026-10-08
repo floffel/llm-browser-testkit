@@ -1409,10 +1409,12 @@ impl ScenarioRunner {
                         ));
                     }
                 },
-                None => break Err((
-                    "wait step has neither selector nor text".to_owned(),
-                    StepStatus::Failed,
-                )),
+                None => {
+                    break Err((
+                        "wait step has neither selector nor text".to_owned(),
+                        StepStatus::Failed,
+                    ))
+                }
             }
         };
         match result {
