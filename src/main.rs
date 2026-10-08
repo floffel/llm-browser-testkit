@@ -168,6 +168,12 @@ enum Command {
         #[arg(long)]
         continue_on_failure: bool,
 
+        /// Re-run a failed test this many times before reporting it
+        /// failed (default: 0 — report the first failure).
+        /// (default: `HARNESS_RETRY_FAILED_TESTS`).
+        #[arg(long, env = "HARNESS_RETRY_FAILED_TESTS")]
+        retry_failed_tests: Option<u32>,
+
         /// Quiet output: hide step results (`-q`), then warnings too
         /// (`-qq`). Failures and the run summary always show.
         #[arg(short = 'q', long, action = ArgAction::Count)]
@@ -254,6 +260,7 @@ struct RunOverrides {
     agent_port: Option<u16>,
     artifacts_dir: Option<String>,
     continue_on_failure: bool,
+    retry_failed_tests: Option<u32>,
 }
 
 /// Builds a scenario's effective global config by applying CLI overrides on
@@ -372,6 +379,9 @@ fn apply_cli_overrides(config: ScenarioConfig, o: &RunOverrides) -> ScenarioConf
     }
     if o.continue_on_failure {
         config.continue_on_failure = true;
+    }
+    if let Some(retries) = o.retry_failed_tests {
+        config.retry_failed_tests = Some(retries);
     }
     config
 }
@@ -534,6 +544,7 @@ async fn main() -> anyhow::Result<()> {
             agent_port,
             artifacts_dir,
             continue_on_failure,
+            retry_failed_tests,
             quiet,
             verbose,
             log_file,
@@ -583,6 +594,7 @@ async fn main() -> anyhow::Result<()> {
                 agent_port,
                 artifacts_dir,
                 continue_on_failure,
+                retry_failed_tests,
             };
 
             // Parse every scenario file, apply CLI overrides + the viewport

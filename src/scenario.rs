@@ -110,9 +110,21 @@ pub struct ScenarioConfig {
     pub start_url: Option<String>,
     /// Whether to auto-navigate to `start_url` before test steps.
     ///
+    /// Continue running remaining steps after a step failure.
+    ///
     /// Disable when a test starts with click-based navigation.
     #[serde(default = "default_auto_navigate")]
     pub auto_navigate: bool,
+    /// Re-run a failed test this many times before reporting it failed.
+    ///
+    /// A shared browser tab plus a contended runner makes some page
+    /// loads stall (a JS chunk or a GraphQL call hangs mid-flight);
+    /// the test then fails on a wait/assert that a fresh run passes.
+    /// The retry re-runs the WHOLE test (fresh per-test isolation and
+    /// auto-navigate), and both attempts' LLM spend stays in the
+    /// budget accounting; only the final attempt's result is reported.
+    #[serde(default)]
+    pub retry_failed_tests: Option<u32>,
     /// LLM temperature (0.0–1.0). Lower = more deterministic.
     #[serde(default = "default_temperature")]
     pub temperature: f64,

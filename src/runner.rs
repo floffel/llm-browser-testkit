@@ -651,35 +651,75 @@ impl ScenarioRunner {
             }
         }
 
+        let retry_budget = self.config.retry_failed_tests.unwrap_or(0);
+
         for test in tests {
-            self.emit_event(&TestEvent::TestStarted {
-                test: test.name.clone(),
-            });
+            // A shared tab on a contended runner makes some page loads
+            // stall (a JS chunk or a GraphQL call hangs mid-flight) and
+            // the test fails on a wait/assert that a fresh run passes.
+            // Re-run the WHOLE test when it failed and the retry budget
+            // allows; the fresh per-test isolation (login clear +
+            // auto-navigate) applies to the retry too. Both attempts'
+            // LLM spend stays in the budget accounting (each attempt
+            // commits its usage); only the final attempt is reported.
+            let details_len = report.details.len();
+            let passed_before = report.passed;
+            let failed_before = report.failed;
+            let skipped_before = report.skipped;
+            #[allow(unused_assignments)]
+            let mut final_result = None;
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                self.emit_event(&TestEvent::TestStarted {
+                    test: test.name.clone(),
+                });
 
-            self.usage.reset_per_test();
+                self.usage.reset_per_test();
 
-            let test_started = Instant::now();
-            let test_result = self.run_test(test, &tab);
-            let duration_ms = test_started.elapsed().as_millis() as u64;
-            let usage = self.usage.current_test_snapshot();
-            self.usage.commit_test(&test.name);
+                let test_started = Instant::now();
+                let test_result = self.run_test(test, &tab);
+                let duration_ms = test_started.elapsed().as_millis() as u64;
+                let usage = self.usage.current_test_snapshot();
+                self.usage.commit_test(&test.name);
 
-            self.emit_event(&TestEvent::TestFinished {
-                test: test.name.clone(),
-                passed: test_result.passed,
-                failed: test_result.failed,
-                skipped: test_result.skipped,
-                duration_ms,
-                cost: usage.total_cost,
-                tokens: usage.total_tokens,
-                input_tokens: usage.total_input_tokens,
-                output_tokens: usage.total_output_tokens,
-                cached_input_tokens: usage.total_cached_input_tokens,
-                cache_creation_input_tokens: usage.total_cache_creation_input_tokens,
-                models: usage.models.clone(),
-                calls: usage.total_calls,
-            });
+                self.emit_event(&TestEvent::TestFinished {
+                    test: test.name.clone(),
+                    passed: test_result.passed,
+                    failed: test_result.failed,
+                    skipped: test_result.skipped,
+                    duration_ms,
+                    cost: usage.total_cost,
+                    tokens: usage.total_tokens,
+                    input_tokens: usage.total_input_tokens,
+                    output_tokens: usage.total_output_tokens,
+                    cached_input_tokens: usage.total_cached_input_tokens,
+                    cache_creation_input_tokens: usage.total_cache_creation_input_tokens,
+                    models: usage.models.clone(),
+                    calls: usage.total_calls,
+                });
 
+                final_result = Some(test_result);
+                let result = final_result.as_ref().expect("just assigned");
+                if result.failed == 0 || result.total == 0 || attempt > retry_budget {
+                    break;
+                }
+                self.reporter.warn(format!(
+                    "! retrying failed test '{}' (attempt {}/{}) — a fresh run passes on \
+                     transient page-load stalls",
+                    test.name,
+                    attempt + 1,
+                    retry_budget + 1
+                ));
+                // Roll this failed attempt out of the report so the
+                // retry's outcome replaces it.
+                report.details.truncate(details_len);
+                report.passed = passed_before;
+                report.failed = failed_before;
+                report.skipped = skipped_before;
+            }
+
+            let test_result = final_result.unwrap_or_default();
             if test_result.failed == 0 && test_result.total > 0 {
                 report.tests_passed += 1;
             } else if test_result.total > 0 {
