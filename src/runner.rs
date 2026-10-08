@@ -1302,86 +1302,129 @@ impl ScenarioRunner {
                 format!("document.body ? document.body.innerText.includes('{escaped}') : false")
             });
 
-            let deadline = Instant::now() + timeout;
+            let mut reload_note = String::new();
+            let mut reloaded = false;
             loop {
-                let sel_ok = sel_js
-                    .as_ref()
-                    .is_none_or(|js| eval_bool(tab, js).unwrap_or(false));
-                let text_ok = text_js
-                    .as_ref()
-                    .is_none_or(|js| eval_bool(tab, js).unwrap_or(false));
-                if sel_ok && text_ok {
-                    let mut what = Vec::new();
-                    if let Some(sel) = &selector {
-                        what.push(format!("found {sel}"));
-                    }
-                    if let Some(t) = text {
-                        what.push(format!("text {t:?} visible"));
-                    }
-                    return StepResult {
-                        name: step_name,
-                        status: StepStatus::Passed,
-                        message: what.join(" and "),
-                    };
-                }
-                if Instant::now() >= deadline {
-                    let mut what = Vec::new();
-                    if let Some(sel) = &selector {
-                        what.push(sel.clone());
-                    }
-                    if let Some(t) = text {
-                        what.push(format!("text {t:?}"));
-                    }
-                    let message = format!(
-                        "wait for {} timed out after {}ms: the event waited for never came",
-                        what.join(" / "),
-                        timeout.as_millis(),
-                    );
-                    if idempotent {
+                let deadline = Instant::now() + timeout;
+                loop {
+                    let sel_ok = sel_js
+                        .as_ref()
+                        .is_none_or(|js| eval_bool(tab, js).unwrap_or(false));
+                    let text_ok = text_js
+                        .as_ref()
+                        .is_none_or(|js| eval_bool(tab, js).unwrap_or(false));
+                    if sel_ok && text_ok {
+                        let mut what = Vec::new();
+                        if let Some(sel) = &selector {
+                            what.push(format!("found {sel}"));
+                        }
+                        if let Some(t) = text {
+                            what.push(format!("text {t:?} visible"));
+                        }
                         return StepResult {
                             name: step_name,
-                            status: StepStatus::Skipped,
-                            message: format!("skipped (idempotent): {message}"),
+                            status: StepStatus::Passed,
+                            message: format!("{}{reload_note}", what.join(" and ")),
                         };
                     }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                // Blank-page self-heal: a stalled runner egress leaves the
+                // SPA unbooted (index.html loaded, JS chunks never arrived,
+                // immosai runs #1646/#1647 — every failure screenshot is an
+                // empty viewport). A wait against that page can never
+                // succeed; reload once and re-wait with the full budget.
+                if !reloaded && page_is_blank(tab) {
+                    reloaded = true;
+                    " (blank page — reloaded once and re-waited)".clone_into(&mut reload_note);
+                    let _ = tab.reload(true, None);
+                    let _ = tab.wait_until_navigated();
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                let mut what = Vec::new();
+                if let Some(sel) = &selector {
+                    what.push(sel.clone());
+                }
+                if let Some(t) = text {
+                    what.push(format!("text {t:?}"));
+                }
+                let message = format!(
+                    "wait for {} timed out after {}ms: the event waited for never came{reload_note}",
+                    what.join(" / "),
+                    timeout.as_millis(),
+                );
+                if idempotent {
                     return StepResult {
                         name: step_name,
-                        status: StepStatus::Failed,
-                        message,
+                        status: StepStatus::Skipped,
+                        message: format!("skipped (idempotent): {message}"),
                     };
                 }
-                std::thread::sleep(Duration::from_millis(250));
+                return StepResult {
+                    name: step_name,
+                    status: StepStatus::Failed,
+                    message,
+                };
             }
         }
 
-        match selector.as_deref() {
-            Some(sel) => match tab.wait_for_element_with_custom_timeout(sel, timeout) {
-                Ok(_) => StepResult {
-                    name: step_name,
-                    status: StepStatus::Passed,
-                    message: format!("found {sel}"),
+        let mut reload_note = String::new();
+        let mut reloaded = false;
+        let result = loop {
+            match selector.as_deref() {
+                Some(sel) => match tab.wait_for_element_with_custom_timeout(sel, timeout) {
+                    Ok(_) => break Ok((sel.to_owned(), reload_note)),
+                    Err(e) => {
+                        // Blank-page self-heal (see the text-wait branch):
+                        // an unbooted SPA never renders the target; reload
+                        // once and re-wait with the full budget.
+                        if !reloaded && page_is_blank(tab) {
+                            reloaded = true;
+                            " (blank page — reloaded once and re-waited)"
+                                .clone_into(&mut reload_note);
+                            let _ = tab.reload(true, None);
+                            let _ = tab.wait_until_navigated();
+                            std::thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                        if idempotent {
+                            break Err((
+                                format!(
+                                    "skipped (idempotent): wait for {sel} timed out after {}ms: {e}",
+                                    timeout.as_millis()
+                                ),
+                                StepStatus::Skipped,
+                            ));
+                        }
+                        break Err((
+                            format!(
+                                "wait for {sel} timed out after {}ms: {e}{reload_note}",
+                                timeout.as_millis()
+                            ),
+                            StepStatus::Failed,
+                        ));
+                    }
                 },
-                Err(e) if idempotent => StepResult {
-                    name: step_name,
-                    status: StepStatus::Skipped,
-                    message: format!(
-                        "skipped (idempotent): wait for {sel} timed out after {}ms: {e}",
-                        timeout.as_millis()
-                    ),
-                },
-                Err(e) => StepResult {
-                    name: step_name,
-                    status: StepStatus::Failed,
-                    message: format!(
-                        "wait for {sel} timed out after {}ms: {e}",
-                        timeout.as_millis()
-                    ),
-                },
-            },
-            None => StepResult {
+                None => break Err((
+                    "wait step has neither selector nor text".to_owned(),
+                    StepStatus::Failed,
+                )),
+            }
+        };
+        match result {
+            Ok((sel, note)) => StepResult {
                 name: step_name,
-                status: StepStatus::Failed,
-                message: "wait step has neither selector nor text".into(),
+                status: StepStatus::Passed,
+                message: format!("found {sel}{note}"),
+            },
+            Err((message, status)) => StepResult {
+                name: step_name,
+                status,
+                message,
             },
         }
     }
@@ -2347,6 +2390,19 @@ fn eval_bool(tab: &Tab, js: &str) -> Result<bool, String> {
         .value
         .and_then(|v| v.as_bool())
         .ok_or_else(|| "evaluate returned non-boolean".to_owned())
+}
+
+/// True when the tab rendered nothing meaningful: no body, an empty
+/// body, or body text that is only whitespace. This is the signature
+/// of a stalled SPA boot (index.html served, JS chunks never arrived —
+/// runner egress stall), where any wait can only time out. A real
+/// error page (e.g. `ERR_CONNECTION_REFUSED`) carries text and is NOT
+/// blank, so those are left alone.
+fn page_is_blank(tab: &Tab) -> bool {
+    const JS: &str = "(() => { if (!document.body) return true; \
+        const t = (document.body.innerText || '').trim(); \
+        return document.body.childElementCount === 0 || t.length === 0; })()";
+    eval_bool(tab, JS).unwrap_or(false)
 }
 
 /// Checks whether a CSS selector matches at least one current element.
