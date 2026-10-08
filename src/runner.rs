@@ -2422,15 +2422,12 @@ fn origin_of(base_url: &str) -> Option<String> {
 /// those on immosai run #1643.
 #[must_use]
 fn test_targets_login(start_url: &str, steps: &[TestStep]) -> bool {
-    let first_navigate = steps.iter().find_map(|s| match s {
-        TestStep::Navigate { url, .. } => Some(url.clone()),
-        _ => None,
-    });
-    match first_navigate {
-        Some(url) => url.contains("login"),
-        // No own navigation: the test rides the auto-navigated start_url.
-        None => start_url.contains("login"),
+    for step in steps {
+        if let TestStep::Navigate { url, .. } = step {
+            return url.contains("login");
+        }
     }
+    start_url.contains("login")
 }
 
 /// Human-readable label for a step, used when steps are skipped after an
