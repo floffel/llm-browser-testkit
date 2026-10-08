@@ -747,13 +747,18 @@ impl ScenarioRunner {
         // (Cognito tokens in localStorage + the hosted-UI cookies). The
         // SPA's login pages then auto-continue authenticated visitors on
         // boot, so a later login test never sees the form and times out
-        // waiting for `#email` (observed on runs #1641/#1642: a shard's
-        // first three logins pass, the fourth onward time out). Tests
-        // that navigate a login route start with cleared cookies + origin
-        // storage; every other test keeps the shared session (most
-        // "page loads" tests rely on it). The HTTP cache is deliberately
-        // NOT cleared — re-downloading the SPA bundle per test would only
-        // add boot time.
+        // waiting for `#email` (observed on immosai runs #1641/#1642: a
+        // shard's first three logins pass, the fourth onward time out).
+        // Clear cookies + origin storage ONLY for tests that perform
+        // their own login (their first navigate step targets a login
+        // route, or they have no navigate step and ride the auto-nav
+        // onto a login start_url). The many "page loads" tests that
+        // navigate app pages directly RELY on the shared session — a
+        // blanket clear bounces them off their target (run #1643: every
+        // shard failed with "the current page is the login page, not
+        // the mailboxes page"). The HTTP cache is deliberately NOT
+        // cleared — re-downloading the SPA bundle per test would only
+        // add boot time on a slow runner egress.
         if auto_navigate && test_targets_login(&start_url, &test.steps) {
             use headless_chrome::protocol::cdp::{Network, Storage};
             if let Err(e) = tab.call_method(Network::ClearBrowserCookies(None)) {
@@ -2407,22 +2412,25 @@ fn origin_of(base_url: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
-/// True when a test performs its own login: its `start_url` or its first
-/// navigate step targets a login route (org `/auth/login`, tenant
-/// `/tenant/login`). Such tests need a cleared session — with a live one
-/// the SPA bounces the login page before the form ever mounts.
+/// True when a test performs its own login: its first navigate step
+/// targets a login route (org `/auth/login`, tenant `/tenant/login`),
+/// or it has no navigate step at all and rides the auto-navigate onto a
+/// login `start_url`. Such tests need a cleared session — with a live one
+/// the SPA bounces the login page before the form ever mounts. Tests
+/// whose own first navigate goes to an app page keep the shared session
+/// (most "page loads" tests rely on it) — a blanket clear broke exactly
+/// those on immosai run #1643.
 #[must_use]
 fn test_targets_login(start_url: &str, steps: &[TestStep]) -> bool {
-    if start_url.contains("login") {
-        return true;
+    let first_navigate = steps.iter().find_map(|s| match s {
+        TestStep::Navigate { url, .. } => Some(url.clone()),
+        _ => None,
+    });
+    match first_navigate {
+        Some(url) => url.contains("login"),
+        // No own navigation: the test rides the auto-navigated start_url.
+        None => start_url.contains("login"),
     }
-    steps
-        .iter()
-        .find_map(|s| match s {
-            TestStep::Navigate { url, .. } => Some(url.clone()),
-            _ => None,
-        })
-        .is_some_and(|u| u.contains("login"))
 }
 
 /// Human-readable label for a step, used when steps are skipped after an
