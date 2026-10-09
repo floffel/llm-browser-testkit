@@ -1303,7 +1303,7 @@ impl ScenarioRunner {
             });
 
             let mut reload_note = String::new();
-            let mut reloaded = false;
+            let mut reloaded = 0u32;
             loop {
                 let deadline = Instant::now() + timeout;
                 loop {
@@ -1336,10 +1336,18 @@ impl ScenarioRunner {
                 // SPA unbooted (index.html loaded, JS chunks never arrived,
                 // immosai runs #1646/#1647 — every failure screenshot is an
                 // empty viewport). A wait against that page can never
-                // succeed; reload once and re-wait with the full budget.
-                if !reloaded && page_is_blank(tab) {
-                    reloaded = true;
-                    " (blank page — reloaded once and re-waited)".clone_into(&mut reload_note);
+                // succeed; reload and re-wait with the full budget. The
+                // runner's egress/resource bursts last minutes (v0.19.5's
+                // single reload was not enough when the burst outlived two
+                // wait budgets — immosai run #1651), so allow up to
+                // MAX_BLANK_HEALS heal cycles with a backoff sleep between
+                // them.
+                if reloaded < MAX_BLANK_HEALS && page_is_blank(tab) {
+                    reloaded += 1;
+                    if reloaded > 1 {
+                        std::thread::sleep(Duration::from_secs(BLANK_HEAL_BACKOFF_SECS));
+                    }
+                    reload_note = format!(" (blank page — reloaded {reloaded}x and re-waited)");
                     let _ = tab.reload(true, None);
                     let _ = tab.wait_until_navigated();
                     std::thread::sleep(Duration::from_secs(2));
@@ -1373,7 +1381,7 @@ impl ScenarioRunner {
         }
 
         let mut reload_note = String::new();
-        let mut reloaded = false;
+        let mut reloaded = 0u32;
         let result = loop {
             match selector.as_deref() {
                 Some(sel) => match tab.wait_for_element_with_custom_timeout(sel, timeout) {
@@ -1381,10 +1389,15 @@ impl ScenarioRunner {
                     Err(e) => {
                         // Blank-page self-heal (see the text-wait branch):
                         // an unbooted SPA never renders the target; reload
-                        // once and re-wait with the full budget.
-                        if !reloaded && page_is_blank(tab) {
-                            reloaded = true;
-                            " (blank page — reloaded once and re-waited)"
+                        // and re-wait with the full budget, with a backoff
+                        // between heal cycles for the runner's multi-minute
+                        // egress/resource bursts (immosai run #1651).
+                        if reloaded < MAX_BLANK_HEALS && page_is_blank(tab) {
+                            reloaded += 1;
+                            if reloaded > 1 {
+                                std::thread::sleep(Duration::from_secs(BLANK_HEAL_BACKOFF_SECS));
+                            }
+                            format!(" (blank page — reloaded {reloaded}x and re-waited)")
                                 .clone_into(&mut reload_note);
                             let _ = tab.reload(true, None);
                             let _ = tab.wait_until_navigated();
@@ -2393,6 +2406,15 @@ fn eval_bool(tab: &Tab, js: &str) -> Result<bool, String> {
         .and_then(|v| v.as_bool())
         .ok_or_else(|| "evaluate returned non-boolean".to_owned())
 }
+
+/// Blank-page self-heal budget per wait step: how many reload cycles a
+/// blank page gets before the wait gives up. The runner's egress and
+/// resource bursts last minutes, so a single reload (v0.19.5) was not
+/// enough when a burst outlived two wait budgets (immosai run #1651).
+const MAX_BLANK_HEALS: u32 = 3;
+/// Backoff sleep (seconds) before the 2nd/3rd blank-heal reload, giving
+/// a transient runner outage time to clear.
+const BLANK_HEAL_BACKOFF_SECS: u64 = 30;
 
 /// True when the tab rendered nothing meaningful: no body, an empty
 /// body, or body text that is only whitespace. This is the signature
