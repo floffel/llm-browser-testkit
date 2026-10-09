@@ -1149,12 +1149,42 @@ impl ScenarioRunner {
         // already-authenticated session), and skipping is the success
         // path, not a failure.
         let probe_secs = if idempotent { 5 } else { 10 };
-        match tab.wait_for_element_with_custom_timeout(&selector, Duration::from_secs(probe_secs)) {
+        // Blank-page self-heal (same as the wait steps): a runner
+        // egress/resource burst can leave the SPA unbooted when a
+        // scenario's FIRST interactive step is a click (run #1652
+        // core-a: contacts.toml opens with navigate → click, the page
+        // was blank 3/3 attempts, and the click never had the wait
+        // step's heal). Reload and re-probe with backoff before
+        // failing.
+        let mut heal_note = String::new();
+        let mut heals = 0u32;
+        let probe = loop {
+            match tab
+                .wait_for_element_with_custom_timeout(&selector, Duration::from_secs(probe_secs))
+            {
+                Ok(element) => break Ok(element),
+                Err(e) => {
+                    if !idempotent && heals < MAX_BLANK_HEALS && page_is_blank(tab) {
+                        heals += 1;
+                        if heals > 1 {
+                            std::thread::sleep(Duration::from_secs(BLANK_HEAL_BACKOFF_SECS));
+                        }
+                        heal_note = format!(" (blank page — reloaded {heals}x and re-clicked)");
+                        let _ = tab.reload(true, None);
+                        let _ = tab.wait_until_navigated();
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                    break Err(e);
+                }
+            }
+        };
+        match probe {
             Ok(element) => match element.click() {
                 Ok(_) => StepResult {
                     name,
                     status: StepStatus::Passed,
-                    message: format!("clicked {selector}"),
+                    message: format!("clicked {selector}{heal_note}"),
                 },
                 Err(e) => StepResult {
                     name,
@@ -1170,7 +1200,7 @@ impl ScenarioRunner {
             Err(e) => StepResult {
                 name,
                 status: StepStatus::Failed,
-                message: format!("element {selector} not found: {e}"),
+                message: format!("element {selector} not found: {e}{heal_note}"),
             },
         }
     }
