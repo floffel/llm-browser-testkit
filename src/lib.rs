@@ -25,6 +25,8 @@ mod auth;
 mod bedrock;
 /// Budget tracking and enforcement.
 pub mod budgets;
+/// Browser console + uncaught-exception capture and error policy.
+pub mod console;
 /// Cost calculation, usage tracking, and pricing.
 pub mod costs;
 /// Failure diagnostics — page-state capture and artifact writing.

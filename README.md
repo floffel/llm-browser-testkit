@@ -237,6 +237,19 @@ timeout:
   against a page that is already known broken). Set
   `continue_on_failure = true` in `[config]` or pass `--continue-on-failure`
   to keep executing every step.
+- **Browser console capture** — the CDP `Log` domain (`console.error`/
+  `console.warn`, failed network requests, CSP violations) and uncaught JS
+  exceptions are captured during each test and handled per
+  `console_errors` in `[config]`:
+  - `discard` (default) — ignore them (assertions see only the DOM, as before).
+  - `show` — append a `Browser console output` block to every assertion's page
+    content so the LLM evaluates the captured errors/warnings, and print them
+    in the step log.
+  - `fail` — fail the assertion step deterministically (no LLM call) as soon as
+    any console error or uncaught exception was captured.
+
+  A swallowed `console.error` (for example a failed GraphQL mutation) is
+  otherwise invisible to a DOM-text assertion; `show`/`fail` surface it.
 - **LLM element targeting is verified** — a response that is not a selector
   (`:not(*)`, `null`, explanations, …) fails immediately with the raw LLM
   output; a selector that matches nothing triggers one retry with feedback.

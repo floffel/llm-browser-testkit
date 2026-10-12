@@ -8,6 +8,7 @@ use headless_chrome::{Browser, LaunchOptions, Tab};
 
 use crate::a2a::A2aClient;
 use crate::budgets::{BudgetStatus, BudgetTracker};
+use crate::console::{ConsoleCapture, ConsoleErrorsPolicy};
 use crate::costs::{calculate_llm_cost, UsageTracker};
 use crate::diagnostics;
 use crate::endpoints::{EndpointRegistry, ResolvedEndpoint, TaskType};
@@ -301,6 +302,8 @@ pub struct ScenarioRunner {
     /// [`crate::parallel::run_scenarios`], the orchestrator owns those two
     /// events (one per batch), so each per-file runner suppresses its own.
     emit_run_events: bool,
+    /// Browser console + uncaught-exception capture (`config.console_errors`).
+    console: ConsoleCapture,
 }
 
 /// Aggregated results from a scenario run.
@@ -520,6 +523,7 @@ impl ScenarioRunner {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
             emit_run_events,
+            console: ConsoleCapture::new(),
         }
     }
 
@@ -602,6 +606,10 @@ impl ScenarioRunner {
 
         let browser = Browser::new(launch_opts).context("failed to launch browser")?;
         let tab = browser.new_tab().context("failed to open browser tab")?;
+        // Capture console errors + uncaught exceptions for the assert policy.
+        self.console
+            .install(&tab)
+            .context("failed to install browser console capture")?;
         match (
             self.config.browser_basic_auth_user.clone(),
             self.config.browser_basic_auth_password.clone(),
@@ -676,6 +684,7 @@ impl ScenarioRunner {
                 });
 
                 self.usage.reset_per_test();
+                self.console.clear();
 
                 let test_started = Instant::now();
                 let test_result = self.run_test(test, &tab);
@@ -1488,7 +1497,29 @@ impl ScenarioRunner {
     ) -> StepResult {
         std::thread::sleep(Duration::from_millis(500));
 
-        let page_content = get_page_text(tab);
+        let mut page_content = get_page_text(tab);
+
+        // Console-error policy (config.console_errors). `fail` gates the step
+        // deterministically (no LLM); `show` appends the captured
+        // errors/warnings to the page text so the definition/preset/prompt
+        // evaluates them alongside the DOM. `discard` (default) ignores them.
+        if self.config.console_errors == ConsoleErrorsPolicy::Fail && self.console.has_errors() {
+            return StepResult {
+                name: "[assert]".into(),
+                status: StepStatus::Failed,
+                message: format!(
+                    "browser console reported {} error(s):\n{}",
+                    self.console.len(),
+                    self.console.render()
+                ),
+            };
+        }
+        if self.config.console_errors == ConsoleErrorsPolicy::Show && !self.console.is_empty() {
+            page_content
+                .body_text
+                .push_str("\n\nBrowser console output (errors/warnings captured via CDP):\n");
+            page_content.body_text.push_str(&self.console.render());
+        }
 
         // Vision attach: capture the full page once per assert step and
         // split it into viewport-tall tiles (the total coverage is bounded

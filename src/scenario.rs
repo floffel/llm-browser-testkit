@@ -155,6 +155,13 @@ pub struct ScenarioConfig {
     /// every step (more diagnostics, more LLM cost on broken apps).
     #[serde(default)]
     pub continue_on_failure: bool,
+    /// What to do with browser console errors and uncaught exceptions
+    /// captured during a test (CDP `Log`/`Runtime.exceptionThrown`):
+    /// `discard` (default — ignore), `show` (append them to the assertion
+    /// payload for the LLM to evaluate and surface them in the step log), or
+    /// `fail` (fail the assertion step deterministically on any error).
+    #[serde(default)]
+    pub console_errors: crate::console::ConsoleErrorsPolicy,
     /// Longest edge (px) of screenshots attached to `screenshot = true`
     /// assert steps, before they are JPEG-encoded and sent to the vision
     /// endpoint. Downscaling keeps vision token cost/quality sane.
