@@ -157,8 +157,8 @@ pub struct ScenarioConfig {
     pub continue_on_failure: bool,
     /// What to do with browser console errors and uncaught exceptions
     /// captured during a test (CDP `Log`/`Runtime.exceptionThrown`):
-    /// `discard` (default — ignore), `show` (append them to the assertion
-    /// payload for the LLM to evaluate and surface them in the step log), or
+    /// `show` (default — append them to the assertion payload for the LLM to
+    /// evaluate and surface them in the step log), `discard` (ignore), or
     /// `fail` (fail the assertion step deterministically on any error).
     #[serde(default)]
     pub console_errors: crate::console::ConsoleErrorsPolicy,

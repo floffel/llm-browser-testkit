@@ -20,8 +20,8 @@ fn entry(level: &str, source: &str, text: &str) -> ConsoleEntry {
 }
 
 #[test]
-fn default_policy_is_discard() {
-    assert_eq!(ConsoleErrorsPolicy::default(), ConsoleErrorsPolicy::Discard);
+fn default_policy_is_show() {
+    assert_eq!(ConsoleErrorsPolicy::default(), ConsoleErrorsPolicy::Show);
 }
 
 #[test]
@@ -79,12 +79,12 @@ steps = []
 }
 
 #[test]
-fn scenario_defaults_console_errors_to_discard() {
+fn scenario_defaults_console_errors_to_show() {
     let toml = r#"
 [[test]]
 name = "dummy"
 steps = []
 "#;
     let scenario: Scenario = toml::from_str(toml).expect("parse TOML");
-    assert_eq!(scenario.config.console_errors, ConsoleErrorsPolicy::Discard);
+    assert_eq!(scenario.config.console_errors, ConsoleErrorsPolicy::Show);
 }

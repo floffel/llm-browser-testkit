@@ -21,11 +21,11 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ConsoleErrorsPolicy {
-    /// Ignore console output entirely (default; backwards compatible).
-    #[default]
+    /// Ignore console output entirely.
     Discard,
     /// Append the captured errors/warnings to the assertion payload so the
-    /// LLM evaluates them, and surface them in the step log.
+    /// LLM evaluates them, and surface them in the step log (default).
+    #[default]
     Show,
     /// Fail the assertion step deterministically when any console error or
     /// uncaught exception was captured (no LLM call).
